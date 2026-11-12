@@ -13,8 +13,9 @@ import { toast, ToastHost } from '../ui/Toast'
 import { currentTab, savedData } from './state'
 import { TopBar } from './TopBar'
 import { applyTheme } from './theme'
+import { UpdateBanner } from './UpdateBanner'
 import { UpdateScreen } from './UpdateScreen'
-import { downloadUpdateInBackground, installPendingUpdate, pendingUpdate } from './updates'
+import { delay, downloadUpdateInBackground, installPendingUpdate, MIN_INSTALL_SCREEN_MS, pendingUpdate } from './updates'
 import '../ui/theme.css'
 
 type Boot = { status: 'loading' } | { status: 'updating'; version: string } | { status: 'fresh' } | { status: 'ok' } | { status: 'error'; message: string; path: string | null }
@@ -70,7 +71,9 @@ export function App() {
       if (version && alive) {
         setBoot({ status: 'updating', version })
         try {
-          await installPendingUpdate()
+          // Keep the install screen up long enough to be read before the install restarts the app.
+          await delay(MIN_INSTALL_SCREEN_MS)
+          if (alive) await installPendingUpdate()
         } catch {
           // fall through to the normal boot
         }
@@ -100,6 +103,7 @@ export function App() {
           <main class="main">{tab === 'faktura' ? <EditorPage /> : tab === 'historie' ? <HistoryPage /> : tab === 'udaje' ? <SavedPage /> : <SettingsPage />}</main>
         </div>
       )}
+      {boot.status === 'ok' && <UpdateBanner />}
       {boot.status === 'fresh' && (
         <Onboarding
           onDone={() => {

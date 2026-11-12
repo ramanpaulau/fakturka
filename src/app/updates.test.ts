@@ -5,7 +5,7 @@ const inTauri = vi.fn()
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }))
 vi.mock('./tauriEnv', () => ({ inTauri: () => inTauri() }))
 
-import { downloadUpdateInBackground, installPendingUpdate, pendingUpdate, resetUpdateSession } from './updates'
+import { downloadUpdateInBackground, installPendingUpdate, pendingUpdate, resetUpdateSession, updateReady } from './updates'
 
 beforeEach(() => {
   invoke.mockReset()
@@ -72,5 +72,38 @@ describe('downloadUpdateInBackground', () => {
   it('swallows a synchronous throw from invoke', () => {
     invoke.mockImplementation(() => { throw new Error('sync') })
     expect(() => downloadUpdateInBackground()).not.toThrow()
+  })
+})
+
+describe('updateReady', () => {
+  const settle = () => new Promise(r => setTimeout(r, 0))
+
+  it('is set to the version update_download resolves', async () => {
+    invoke.mockResolvedValue('0.3.0')
+    downloadUpdateInBackground()
+    await settle()
+    expect(updateReady.value).toBe('0.3.0')
+  })
+
+  it('stays null when update_download resolves null', async () => {
+    invoke.mockResolvedValue(null)
+    downloadUpdateInBackground()
+    await settle()
+    expect(updateReady.value).toBeNull()
+  })
+
+  it('stays null when update_download rejects', async () => {
+    invoke.mockRejectedValue(new Error('offline'))
+    downloadUpdateInBackground()
+    await settle()
+    expect(updateReady.value).toBeNull()
+  })
+
+  it('resetUpdateSession clears it', async () => {
+    invoke.mockResolvedValue('0.3.0')
+    downloadUpdateInBackground()
+    await settle()
+    resetUpdateSession()
+    expect(updateReady.value).toBeNull()
   })
 })

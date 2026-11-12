@@ -323,6 +323,42 @@ input::placeholder {
   color: var(--muted);
   font-size: 12.5px;
 }
+/* "update ready" panel: bottom-right, above the toasts' area (toasts sit at bottom: 16px) */
+.upd-banner {
+  position: fixed;
+  right: 16px;
+  bottom: 72px;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.upd-banner p {
+  margin: 0;
+}
+.upd-banner-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* the install screen started from the panel covers the whole window */
+.upd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  overflow: auto;
+  background: var(--bg);
+}
+.upd-overlay > .upd-page {
+  height: 100%;
+}
 
 /* ---- onboarding (first start) ---- */
 .ob-page {

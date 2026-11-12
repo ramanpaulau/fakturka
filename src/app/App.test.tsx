@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact'
 import { fixtureInvoice } from '../test/fixtures'
 import { emptySavedData } from '../storage/dataStore'
 import { getBackend, MemoryBackend } from '../storage/backend'
@@ -13,7 +13,7 @@ const invoke = vi.fn()
 const inTauri = vi.fn()
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }))
 vi.mock('./tauriEnv', () => ({ inTauri: () => inTauri() }))
-import { resetUpdateSession } from './updates'
+import { MIN_INSTALL_SCREEN_MS, resetUpdateSession } from './updates'
 
 const backend = () => getBackend() as MemoryBackend
 
@@ -30,7 +30,10 @@ beforeEach(() => {
   inTauri.mockReturnValue(false)
   resetUpdateSession()
 })
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 describe('App boot', () => {
   it('ok: renders the shell with the editor on the Faktura tab', async () => {
@@ -125,16 +128,17 @@ describe('App boot', () => {
 describe('App startup update flow', () => {
   const commands = () => invoke.mock.calls.map(c => c[0])
 
-  function mockCommands(opts: { pending: string | null; install?: 'reject' | 'never' }) {
+  function mockCommands(opts: { pending: string | null; install?: 'reject' | 'never'; download?: string | null }) {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === 'update_pending') return Promise.resolve(opts.pending)
       if (cmd === 'update_install_pending') return opts.install === 'never' ? new Promise(() => {}) : Promise.reject(new Error('install failed'))
-      if (cmd === 'update_download') return Promise.resolve(null)
+      if (cmd === 'update_download') return Promise.resolve(opts.download ?? null)
       return Promise.reject(new Error('unexpected ' + cmd))
     })
   }
 
   it('startup with a pending update shows the install screen', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     inTauri.mockReturnValue(true)
     backend().dataFile = JSON.stringify(emptySavedData())
     mockCommands({ pending: '0.3.0', install: 'never' })
@@ -142,6 +146,7 @@ describe('App startup update flow', () => {
     expect(await screen.findByRole('heading', { name: 'Instaluji novou verzi 0.3.0…' })).toBeInTheDocument()
     expect(screen.getByRole('progressbar', { name: 'Instalace aktualizace' })).toBeInTheDocument()
     expect(screen.getByText('Aplikace se za chvíli sama znovu spustí.')).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS) })
     expect(commands()).toContain('update_install_pending')
     await new Promise(r => setTimeout(r, 20))
     expect(screen.queryByRole('button', { name: 'Historie' })).toBeNull()
@@ -149,10 +154,49 @@ describe('App startup update flow', () => {
     expect(commands()).not.toContain('update_download')
   })
 
+  it('startup: the install screen stays visible for MIN_INSTALL_SCREEN_MS before installing', async () => {
+    vi.useFakeTimers()
+    inTauri.mockReturnValue(true)
+    backend().dataFile = JSON.stringify(emptySavedData())
+    mockCommands({ pending: '0.3.0', install: 'never' })
+    render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByRole('heading', { name: 'Instaluji novou verzi 0.3.0…' })).toBeInTheDocument()
+    expect(commands()).not.toContain('update_install_pending')
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS - 1) })
+    expect(commands()).not.toContain('update_install_pending')
+    expect(screen.getByRole('progressbar', { name: 'Instalace aktualizace' })).toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(commands()).toContain('update_install_pending')
+  })
+
+  it('a finished background download shows the update banner over the app', async () => {
+    inTauri.mockReturnValue(true)
+    backend().dataFile = JSON.stringify(emptySavedData())
+    mockCommands({ pending: null, download: '0.3.0' })
+    render(<App />)
+    expect(await screen.findByText('Je připravená nová verze 0.3.0.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Historie' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Aktualizovat' })).toBeInTheDocument()
+    expect(commands()).not.toContain('update_install_pending')
+  })
+
+  it('no update banner on the onboarding screen', async () => {
+    inTauri.mockReturnValue(true)
+    mockCommands({ pending: null, download: '0.3.0' })
+    render(<App />)
+    expect(await screen.findByText('Vítejte ve Fakturce')).toBeInTheDocument()
+    await waitFor(() => expect(commands()).toContain('update_download'))
+    await new Promise(r => setTimeout(r, 20))
+    expect(screen.queryByText(/Je připravená nová verze/)).toBeNull()
+  })
+
   it('startup: install fails -> app boots, silently', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     inTauri.mockReturnValue(true)
     mockCommands({ pending: '0.3.0', install: 'reject' })
     render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS) })
     expect(await screen.findByText('Vítejte ve Fakturce')).toBeInTheDocument()
     expect(screen.queryByRole('progressbar')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
@@ -181,10 +225,12 @@ describe('App startup update flow', () => {
   })
 
   it('startup: install fails -> an ok boot still downloads once', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     inTauri.mockReturnValue(true)
     backend().dataFile = JSON.stringify(emptySavedData())
     mockCommands({ pending: '0.3.0', install: 'reject' })
     render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS) })
     expect(await screen.findByRole('button', { name: 'Historie' })).toBeInTheDocument()
     await waitFor(() => expect(commands().filter(c => c === 'update_download')).toHaveLength(1))
     expect(commands().indexOf('update_install_pending')).toBeLessThan(commands().indexOf('update_download'))

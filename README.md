@@ -21,7 +21,7 @@ Only Windows is supported. The macOS builds described below are for local develo
 
 ## Updates
 
-Updates are automatic. The app quietly downloads a newer release in the background. At the next start it shows a short screen, "Instaluji novou verzi …" ("Installing the new version …"), installs the update and restarts. There is nothing to do.
+Updates are automatic. The app quietly downloads a newer release in the background. A small panel offers **Aktualizovat** ("Update") as soon as an update is downloaded; otherwise it installs at the next start. Either way the app shows a short screen, "Instaluji novou verzi …" ("Installing the new version …"), installs the update and restarts. If an invoice has unsaved changes, the app asks before updating. There is nothing else to do.
 
 If you are offline or something goes wrong, the app simply keeps working as before. An update that fails to install twice is skipped until a newer version is released. Updates never touch your data.
 

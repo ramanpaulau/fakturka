@@ -2,6 +2,7 @@ import { savedData } from '../app/state'
 import { newInvoiceFrom } from '../domain/newInvoice'
 import type { Invoice, InvoiceRecord } from '../domain/types'
 import { getBackend } from '../storage/backend'
+import { revealItemInDir } from '../history/opener'
 import { findConflict, invoicePdfPath, listInvoices, resolveInvoiceDir, saveInvoice } from '../storage/invoiceStore'
 import { confirmDialog } from '../ui/Dialog'
 import { toast } from '../ui/Toast'
@@ -20,19 +21,39 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 let lastPdfPath: string | null = null
 
 /**
- * Uložit PDF: writes the PDF + JSON pair of the invoice on the sheet into the invoice folder.
- * Asks before replacing any saved record other than the one the editor shows. Resolves true when saved;
- * on any failure the editor is left as it was and an error toast is shown.
+ * Uložit PDF: writes the PDF + JSON pair of the invoice on the sheet into the invoice folder, then shows the PDF in the
+ * system file manager. Asks before replacing any saved record other than the one the editor shows. Resolves true when
+ * saved; on any failure the editor is left as it was and an error toast is shown (and nothing is revealed).
  */
 export function saveCurrent(): Promise<boolean> {
-  // A second click while saving joins the running save instead of writing (and asking) twice.
-  saving ??= doSave().finally(() => {
-    saving = null
-  })
+  revealRequested = true
+  return runSave()
+}
+
+/** The save itself, shared by Uložit PDF and Tisknout. A second call while saving joins the running save instead of writing (and asking) twice. */
+function runSave(): Promise<boolean> {
+  saving ??= doSave()
+    .then(ok => {
+      if (ok && revealRequested && lastPdfPath) revealSaved(lastPdfPath)
+      return ok
+    })
+    .finally(() => {
+      saving = null
+      revealRequested = false
+    })
   return saving
 }
 
 let saving: Promise<boolean> | null = null
+/** Set by Uložit PDF (also when it joins a running save), so only that action reveals the PDF, once per save. */
+let revealRequested = false
+
+/** Fire-and-forget: a failure (or the browser build without Tauri) is ignored silently; the save already succeeded. */
+function revealSaved(path: string): void {
+  Promise.resolve()
+    .then(() => revealItemInDir(path))
+    .catch(() => {})
+}
 
 /**
  * Resolves once no save is running. Anything that replaces the invoice on the sheet awaits it first, so the folder
@@ -101,7 +122,7 @@ export function printCurrent(): Promise<void> {
 let printing: Promise<void> | null = null
 
 async function doPrint(): Promise<void> {
-  if (!(await saveCurrent())) return
+  if (!(await runSave())) return
   try {
     if (PRINT_MODE === 'webview') {
       document.body.dataset.printing = '1'

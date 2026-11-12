@@ -6,6 +6,7 @@ import { renderInvoicePdf } from '../pdf/renderPdf'
 import { emptySavedData } from '../storage/dataStore'
 import { getBackend, MemoryBackend } from '../storage/backend'
 import { fixtureInvoice } from '../test/fixtures'
+import { revealItemInDir } from '../history/opener'
 import { confirmDialog } from '../ui/Dialog'
 import { toast } from '../ui/Toast'
 import { bootEditor, handleCloseRequest, printCurrent, saveCurrent, startNew } from './actions'
@@ -14,6 +15,7 @@ import { editorReady, invoice, isSaved, loadedNumber, loadIntoEditor, setField, 
 vi.mock('../pdf/renderPdf', () => ({ renderInvoicePdf: vi.fn(async () => new Uint8Array([1])) }))
 vi.mock('../ui/Dialog', () => ({ confirmDialog: vi.fn(async () => true) }))
 vi.mock('../ui/Toast', () => ({ toast: vi.fn() }))
+vi.mock('../history/opener', () => ({ openPath: vi.fn(async () => {}), revealItemInDir: vi.fn(async () => {}) }))
 
 const DIR = '/Dokumenty/Faktury'
 const PDF = `${DIR}/pdf/2026-11_faktura-202611.pdf`
@@ -22,6 +24,7 @@ const backend = () => getBackend() as MemoryBackend
 const confirmMock = vi.mocked(confirmDialog)
 const toastMock = vi.mocked(toast)
 const renderMock = vi.mocked(renderInvoicePdf)
+const revealMock = vi.mocked(revealItemInDir)
 
 const OVERWRITE = (n: string) => ({ title: 'Přepsat fakturu?', body: `Faktura ${n} už existuje. Chcete ji nahradit?`, confirm: 'Přepsat', danger: true })
 
@@ -40,6 +43,7 @@ beforeEach(() => {
   confirmMock.mockReset().mockResolvedValue(true)
   toastMock.mockReset()
   renderMock.mockReset().mockResolvedValue(new Uint8Array([1]))
+  revealMock.mockReset().mockResolvedValue(undefined)
   vi.useRealTimers()
 })
 afterEach(() => {
@@ -155,6 +159,50 @@ describe('saveCurrent', () => {
     expect(toastMock).toHaveBeenCalledWith('Uložení se nezdařilo: Font x: HTTP 404', 'error')
     expect(isSaved.value).toBe(false)
     expect(backend().files.size).toBe(0)
+  })
+})
+
+describe('Uložit PDF shows the saved PDF in the file manager', () => {
+  it('reveals the PDF just written (in pdf/) once', async () => {
+    expect(await saveCurrent()).toBe(true)
+    expect(revealMock).toHaveBeenCalledTimes(1)
+    expect(revealMock).toHaveBeenCalledWith(PDF)
+  })
+
+  it('reveals once when a second click joins the running save', async () => {
+    await Promise.all([saveCurrent(), saveCurrent()])
+    expect(revealMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reveal when printing (which saves first)', async () => {
+    vi.spyOn(window, 'print').mockImplementation(() => {})
+    await printCurrent()
+    expect(backend().files.has(PDF)).toBe(true)
+    expect(revealMock).not.toHaveBeenCalled()
+  })
+
+  it('does not reveal after a failed, cancelled or invalid save, nor on a later print', async () => {
+    backend().failWritesUnder = DIR
+    expect(await saveCurrent()).toBe(false)
+    backend().failWritesUnder = undefined
+    await putRecord(fixtureInvoice)
+    loadIntoEditor({ ...fixtureInvoice, amount: 1 }, false)
+    confirmMock.mockResolvedValue(false)
+    expect(await saveCurrent()).toBe(false)
+    loadIntoEditor({ ...fixtureInvoice, amount: null }, false)
+    expect(await saveCurrent()).toBe(false)
+    loadIntoEditor({ ...fixtureInvoice, amount: 2 }, false)
+    confirmMock.mockResolvedValue(true)
+    vi.spyOn(window, 'print').mockImplementation(() => {})
+    await printCurrent()
+    expect(revealMock).not.toHaveBeenCalled()
+  })
+
+  it('ignores a failing reveal: the save still succeeds without an error toast', async () => {
+    revealMock.mockRejectedValue(new Error('Funguje jen v aplikaci'))
+    expect(await saveCurrent()).toBe(true)
+    await new Promise(r => setTimeout(r, 0))
+    expect(toastMock.mock.calls).toEqual([['Faktura uložena']])
   })
 })
 

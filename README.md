@@ -40,6 +40,8 @@ The app folder (identifier `cz.fakturka.desktop`) is:
 
 **OneDrive (Windows):** the Documents folder is often synced with OneDrive, so `Documents\Faktury` may end up in the cloud. The app itself sends nothing anywhere. If you do not want it synced, pick a different folder outside OneDrive in **Nastavení** ("Settings").
 
+After **Uložit PDF** ("Save PDF") the app opens the `pdf` folder in Explorer (Finder on macOS) with the new PDF selected. Printing does not.
+
 **Invoices saved by version 0.2.0 or earlier** sit directly in `Documents\Faktury` (both files side by side). They stay where they are and are listed, opened, exported and moved like the others. An invoice moves into the `pdf` and `json` folders the next time you save it; the old pair is then removed.
 
 You can change the invoice folder in **Nastavení** with the **Změnit…** ("Change…") button; existing invoices are moved to the new folder safely. Characters that are not allowed in Windows file names (for example `/` or `:` in an invoice number) are replaced with a dash in the file name. The number on the invoice stays exactly as you typed it.

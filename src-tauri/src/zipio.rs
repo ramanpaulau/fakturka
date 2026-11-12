@@ -1,5 +1,5 @@
-use crate::files::sibling_with_suffix;
-use crate::moves::validate_name;
+use crate::files::{sibling_with_suffix, JSON_DIR, PDF_DIR};
+use crate::moves::{rel_path, validate_name, validate_rel_name};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
@@ -46,11 +46,35 @@ fn invoice_entry_name(entry: &str) -> Option<&str> {
     validate_invoice_file(name).ok().map(|_| name)
 }
 
+/// The file name of a relative path (`pdf/a.pdf` -> `a.pdf`); the zip keeps only that, under `faktury/`.
+fn flat_name(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or(rel, |(_, name)| name)
+}
+
+/// The sub-folder of the invoice folder an imported file goes to: PDFs to `pdf/`, JSONs to `json/`.
+fn import_target(dest_dir: &Path, name: &str) -> PathBuf {
+    if has_ext(name, ".pdf") {
+        dest_dir.join(PDF_DIR).join(name)
+    } else if has_ext(name, ".json") {
+        dest_dir.join(JSON_DIR).join(name)
+    } else {
+        dest_dir.join(name)
+    }
+}
+
+/// `files` are paths relative to `invoice_dir` (see `validate_rel_name`); each is stored flat as `faktury/<file name>`,
+/// so the zip format is the same as 0.2.0's. Two paths with one file name (compared case-insensitively) are refused,
+/// since such a zip could not be imported.
 fn export_to(invoice_dir: &Path, files: &[String], data_json: &str, dest: &Path) -> Result<(), String> {
     let mut seen = HashSet::new();
     let files: Vec<&String> = files.iter().filter(|f| seen.insert(f.as_str())).collect();
+    let mut flat = HashSet::new();
     for f in &files {
-        validate_invoice_file(f)?;
+        validate_rel_name(f)?;
+        validate_invoice_file(flat_name(f))?;
+        if !flat.insert(flat_name(f).to_lowercase()) {
+            return Err(format!("Soubor {} je ve složce s fakturami dvakrát", flat_name(f)));
+        }
     }
     let tmp = sibling_with_suffix(dest, ".tmp");
     let result = write_zip(invoice_dir, &files, data_json, &tmp).and_then(|_| {
@@ -68,9 +92,9 @@ fn write_zip(invoice_dir: &Path, files: &[&String], data_json: &str, tmp: &Path)
     let mut w = zip::ZipWriter::new(file);
     let opts = SimpleFileOptions::default();
     for f in files {
-        let src = invoice_dir.join(f);
+        let src = rel_path(invoice_dir, f);
         let bytes = fs::read(&src).map_err(|e| format!("Nelze načíst soubor {}: {e}", src.display()))?;
-        w.start_file(format!("{INVOICE_PREFIX}{f}"), opts).map_err(|e| werr(&e))?;
+        w.start_file(format!("{INVOICE_PREFIX}{}", flat_name(f)), opts).map_err(|e| werr(&e))?;
         w.write_all(&bytes).map_err(|e| werr(&e))?;
     }
     w.start_file(DATA_ENTRY, opts).map_err(|e| werr(&e))?;
@@ -147,7 +171,9 @@ fn exists_at_all(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok()
 }
 
-/// Extracts `faktury/<name>` for every name into `dest_dir` (flattened), all or nothing. Like `move_invoices`, an
+/// Extracts `faktury/<name>` for every name into `dest_dir`, PDFs into its `pdf/` and JSONs into its `json/` sub-folder
+/// (see `import_target`), all or nothing. A file of the same name in `dest_dir` itself (the 0.2.0 layout) is a conflict
+/// as well unless the name is in `overwrite`; it is never written to (the caller removes a replaced record's legacy files). Like `move_invoices`, an
 /// existing target (looked up on the file system, so case-insensitive ones count) that is not listed in `overwrite`
 /// is a conflict ("Konflikt: <name>") and nothing is written. Every file is staged as
 /// a temporary file first, and only when all of them are complete are they renamed into place. A replaced file
@@ -165,7 +191,13 @@ fn extract_to(path: &Path, names: &[String], dest_dir: &Path, overwrite: &[Strin
         if archive.index_for_name(&format!("{INVOICE_PREFIX}{n}")).is_none() {
             return Err(format!("V záloze chybí soubor {n}"));
         }
-        let target = dest_dir.join(n);
+        let target = import_target(dest_dir, n);
+        // A legacy (0.2.0) file of the same name in the folder itself counts too: one the app could not read as an
+        // invoice must stop the import as before, not end up hidden behind the new copy.
+        let legacy = dest_dir.join(n.as_str());
+        if legacy != target && exists_at_all(&legacy) && !overwrite.contains(n.as_str()) {
+            return Err(format!("Konflikt: {n}"));
+        }
         if exists_at_all(&target) {
             if !overwrite.contains(n.as_str()) {
                 return Err(format!("Konflikt: {n}"));
@@ -175,7 +207,11 @@ fn extract_to(path: &Path, names: &[String], dest_dir: &Path, overwrite: &[Strin
             }
         }
     }
-    fs::create_dir_all(dest_dir).map_err(|e| format!("Nelze vytvořit složku: {e}"))?;
+    for n in &names {
+        if let Some(parent) = import_target(dest_dir, n).parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Nelze vytvořit složku: {e}"))?;
+        }
+    }
 
     // Stage everything.
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (temp, target)
@@ -185,7 +221,7 @@ fn extract_to(path: &Path, names: &[String], dest_dir: &Path, overwrite: &[Strin
         }
     };
     for n in &names {
-        let target = dest_dir.join(n);
+        let target = import_target(dest_dir, n);
         let tmp = sibling_with_suffix(&target, ".importing");
         let staged_ok = (|| -> Result<(), String> {
             let entry = archive.by_name(&format!("{INVOICE_PREFIX}{n}")).map_err(|e| format!("Nelze přečíst soubor {n}: {e}"))?;
@@ -368,8 +404,79 @@ mod tests {
         make_zip(&zip, &[("faktury/a.json", b"{\"a\":1}"), ("faktury/a.pdf", b"pdf-a"), ("faktury/b.pdf", b"pdf-b")]);
         let dest = root.path().join("new").join("Faktury");
         extract_to(&zip, &s(&["a.json", "a.pdf"]), &dest, &[]).unwrap();
-        assert_eq!(listing(&dest), ["a.json", "a.pdf"]);
-        assert_eq!(fs::read(dest.join("a.json")).unwrap(), b"{\"a\":1}");
+        assert_eq!(listing(&dest), ["json", "pdf"]);
+        assert_eq!(listing(&dest.join("json")), ["a.json"]);
+        assert_eq!(listing(&dest.join("pdf")), ["a.pdf"]);
+        assert_eq!(fs::read(dest.join("json").join("a.json")).unwrap(), b"{\"a\":1}");
+        assert_eq!(fs::read(dest.join("pdf").join("a.pdf")).unwrap(), b"pdf-a");
+    }
+
+    #[test]
+    fn export_reads_relative_paths_and_writes_flat_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = invoice_dir(root.path());
+        fs::create_dir(dir.join("pdf")).unwrap();
+        fs::create_dir(dir.join("json")).unwrap();
+        fs::write(dir.join("json").join("2026-12_faktura-2.json"), "{\"n\":2}").unwrap();
+        fs::write(dir.join("pdf").join("2026-12_faktura-2.pdf"), b"pdf-2").unwrap();
+        let dest = root.path().join("out.zip");
+        let files = s(&["json/2026-12_faktura-2.json", "pdf/2026-12_faktura-2.pdf", "2026-11_faktura-1.json", "lone.pdf"]);
+        export_to(&dir, &files, "{}", &dest).unwrap();
+        let mut archive = open_archive(&dest).unwrap();
+        let mut entries: Vec<String> = archive.file_names().map(str::to_string).collect();
+        entries.sort();
+        assert_eq!(entries, s(&["faktura-data.json", "faktury/2026-11_faktura-1.json", "faktury/2026-12_faktura-2.json", "faktury/2026-12_faktura-2.pdf", "faktury/lone.pdf"]));
+        let mut bytes = Vec::new();
+        archive.by_name("faktury/2026-12_faktura-2.pdf").unwrap().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"pdf-2");
+    }
+
+    #[test]
+    fn export_rejects_bad_relative_paths_and_two_paths_with_one_file_name() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = invoice_dir(root.path());
+        fs::create_dir(dir.join("json")).unwrap();
+        fs::write(dir.join("json").join("2026-11_faktura-1.json"), "{}").unwrap();
+        let dest = root.path().join("out.zip");
+        for bad in ["sub/2026-11_faktura-1.json", "json/../x.json", "pdf/x.txt", "json\\x.json", "PDF/lone.pdf"] {
+            assert!(export_to(&dir, &s(&[bad]), "{}", &dest).is_err(), "{bad:?}");
+        }
+        let e = export_to(&dir, &s(&["json/2026-11_faktura-1.json", "2026-11_faktura-1.json"]), "{}", &dest).unwrap_err();
+        assert!(e.contains("2026-11_faktura-1.json"), "{e}");
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn extract_conflicts_are_checked_in_the_subfolder() {
+        let root = tempfile::tempdir().unwrap();
+        let zip = root.path().join("in.zip");
+        make_zip(&zip, &[("faktury/a.json", b"new-a"), ("faktury/a.pdf", b"new-pdf")]);
+        let dest = root.path().join("d");
+        fs::create_dir_all(dest.join("json")).unwrap();
+        fs::write(dest.join("json").join("a.json"), b"old-a").unwrap();
+        assert_eq!(extract_to(&zip, &s(&["a.json", "a.pdf"]), &dest, &[]).unwrap_err(), "Konflikt: a.json");
+        assert_eq!(fs::read(dest.join("json").join("a.json")).unwrap(), b"old-a");
+        assert!(!dest.join("pdf").join("a.pdf").exists());
+        extract_to(&zip, &s(&["a.json", "a.pdf"]), &dest, &s(&["a.json"])).unwrap();
+        assert_eq!(fs::read(dest.join("json").join("a.json")).unwrap(), b"new-a");
+        assert_eq!(fs::read(dest.join("pdf").join("a.pdf")).unwrap(), b"new-pdf");
+    }
+
+    #[test]
+    fn extract_treats_a_legacy_file_of_the_same_name_in_the_folder_itself_as_a_conflict() {
+        // 0.2.0 kept invoices in the folder itself; one the app could not read must still stop the import, as before.
+        let root = tempfile::tempdir().unwrap();
+        let zip = root.path().join("in.zip");
+        make_zip(&zip, &[("faktury/a.json", b"new-a"), ("faktury/a.pdf", b"new-pdf")]);
+        let dest = root.path().join("d");
+        fs::create_dir(&dest).unwrap();
+        fs::write(dest.join("a.json"), b"{corrupt").unwrap();
+        assert_eq!(extract_to(&zip, &s(&["a.json", "a.pdf"]), &dest, &[]).unwrap_err(), "Konflikt: a.json");
+        assert_eq!(listing(&dest), ["a.json"]);
+        // listed in overwrite (the caller replaces that record and removes its legacy files), it goes to json/
+        extract_to(&zip, &s(&["a.json", "a.pdf"]), &dest, &s(&["a.json"])).unwrap();
+        assert_eq!(fs::read(dest.join("json").join("a.json")).unwrap(), b"new-a");
+        assert_eq!(fs::read(dest.join("a.json")).unwrap(), b"{corrupt");
     }
 
     #[test]
@@ -378,11 +485,11 @@ mod tests {
         let zip = root.path().join("in.zip");
         make_zip(&zip, &[("faktury/a.json", b"new")]);
         let dest = root.path().join("d");
-        fs::create_dir(&dest).unwrap();
-        fs::write(dest.join("a.json"), b"old").unwrap();
+        fs::create_dir_all(dest.join("json")).unwrap();
+        fs::write(dest.join("json").join("a.json"), b"old").unwrap();
         extract_to(&zip, &s(&["a.json"]), &dest, &s(&["a.json"])).unwrap();
-        assert_eq!(fs::read(dest.join("a.json")).unwrap(), b"new");
-        assert_eq!(listing(&dest), ["a.json"]);
+        assert_eq!(fs::read(dest.join("json").join("a.json")).unwrap(), b"new");
+        assert_eq!(listing(&dest.join("json")), ["a.json"]);
     }
 
     #[test]
@@ -416,17 +523,18 @@ mod tests {
         let zip = root.path().join("in.zip");
         make_zip(&zip, &[("faktury/a.json", b"new-a"), ("faktury/b.json", b"new-b")]);
         let dest = root.path().join("d");
-        fs::create_dir(&dest).unwrap();
-        fs::write(dest.join("a.json"), b"old-a").unwrap();
+        let json = dest.join("json");
+        fs::create_dir_all(&json).unwrap();
+        fs::write(json.join("a.json"), b"old-a").unwrap();
         // an entry that is missing from the zip
         assert!(extract_to(&zip, &s(&["a.json", "b.json", "missing.json"]), &dest, &s(&["a.json"])).is_err());
-        assert_eq!(fs::read(dest.join("a.json")).unwrap(), b"old-a");
-        assert_eq!(listing(&dest), ["a.json"]);
+        assert_eq!(fs::read(json.join("a.json")).unwrap(), b"old-a");
+        assert_eq!(listing(&json), ["a.json"]);
         // a directory at a target is refused up front, so the first file is not replaced either
-        fs::create_dir(dest.join("b.json")).unwrap();
+        fs::create_dir(json.join("b.json")).unwrap();
         assert!(extract_to(&zip, &s(&["a.json", "b.json"]), &dest, &s(&["a.json", "b.json"])).is_err());
-        assert_eq!(fs::read(dest.join("a.json")).unwrap(), b"old-a");
-        assert_eq!(listing(&dest), ["a.json", "b.json"]);
+        assert_eq!(fs::read(json.join("a.json")).unwrap(), b"old-a");
+        assert_eq!(listing(&json), ["a.json", "b.json"]);
     }
 
     #[test]
@@ -435,17 +543,18 @@ mod tests {
         let zip = root.path().join("in.zip");
         make_zip(&zip, &[("faktury/a.json", b"new-a"), ("faktury/b.json", b"new-b")]);
         let dest = root.path().join("d");
-        fs::create_dir(&dest).unwrap();
-        fs::write(dest.join("b.json"), b"unknown-old-b").unwrap();
+        let json = dest.join("json");
+        fs::create_dir_all(&json).unwrap();
+        fs::write(json.join("b.json"), b"unknown-old-b").unwrap();
         let e = extract_to(&zip, &s(&["a.json", "b.json"]), &dest, &[]).unwrap_err();
         assert_eq!(e, "Konflikt: b.json");
-        assert_eq!(fs::read(dest.join("b.json")).unwrap(), b"unknown-old-b");
-        assert_eq!(listing(&dest), ["b.json"]);
+        assert_eq!(fs::read(json.join("b.json")).unwrap(), b"unknown-old-b");
+        assert_eq!(listing(&json), ["b.json"]);
         // overwrite only covers the listed names
         let e = extract_to(&zip, &s(&["a.json", "b.json"]), &dest, &s(&["a.json"])).unwrap_err();
         assert_eq!(e, "Konflikt: b.json");
         extract_to(&zip, &s(&["a.json", "b.json"]), &dest, &s(&["b.json"])).unwrap();
-        assert_eq!(fs::read(dest.join("b.json")).unwrap(), b"new-b");
+        assert_eq!(fs::read(json.join("b.json")).unwrap(), b"new-b");
     }
 
     #[test]
@@ -456,7 +565,7 @@ mod tests {
         make_zip(&zip, &[("faktury/a.json", b"new-a")]);
         let dest = root.path().join("d");
         extract_to(&zip, &s(&["a.json"]), &dest, &s(&["a.json"])).unwrap();
-        assert_eq!(fs::read(dest.join("a.json")).unwrap(), b"new-a");
+        assert_eq!(fs::read(dest.join("json").join("a.json")).unwrap(), b"new-a");
     }
 
     #[test]

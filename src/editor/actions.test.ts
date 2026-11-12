@@ -16,8 +16,8 @@ vi.mock('../ui/Dialog', () => ({ confirmDialog: vi.fn(async () => true) }))
 vi.mock('../ui/Toast', () => ({ toast: vi.fn() }))
 
 const DIR = '/Dokumenty/Faktury'
-const PDF = `${DIR}/2026-11_faktura-202611.pdf`
-const JSON_PATH = `${DIR}/2026-11_faktura-202611.json`
+const PDF = `${DIR}/pdf/2026-11_faktura-202611.pdf`
+const JSON_PATH = `${DIR}/json/2026-11_faktura-202611.json`
 const backend = () => getBackend() as MemoryBackend
 const confirmMock = vi.mocked(confirmDialog)
 const toastMock = vi.mocked(toast)

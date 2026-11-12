@@ -408,7 +408,7 @@ describe('while the editor is saving', () => {
     expect(invoice.value.number).toBe('202611')
     expect(loadedNumber.value).toBe('202611')
     expect(isSaved.value).toBe(true)
-    expect(backend().files.has(path('2026-11_faktura-202612.json'))).toBe(true)
+    expect(backend().files.has(path('json/2026-11_faktura-202612.json'))).toBe(true)
   })
 
   it('Nová faktura podle této waits for the save and does not reuse its number', async () => {
@@ -446,6 +446,25 @@ describe('Smazat', () => {
     expect(trash).toHaveBeenCalledWith([path('2026-11_faktura-202611.json'), path('2026-11_faktura-202611.pdf')])
     expect(screen.getByText('202610')).toBeInTheDocument()
     expect(backend().files.has(path('2026-11_faktura-202611.pdf'))).toBe(false)
+  })
+
+  it('an invoice saved in both layouts is one row, and deleting it trashes the new and the legacy files', async () => {
+    const i = inv('202611', '2026-11-30', 42000)
+    backend().files.set(path('json/2026-11_faktura-202611.json'), JSON.stringify(i))
+    backend().files.set(path('pdf/2026-11_faktura-202611.pdf'), new Uint8Array([4]))
+    const trash = vi.spyOn(backend(), 'trash')
+    mount()
+    openMenu(await row('202611'))
+    expect(screen.getAllByText('202611')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Smazat…' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Smazat' }))
+    await waitFor(() => expect(screen.queryByText('202611')).toBeNull())
+    expect([...trash.mock.calls[0][0]].sort()).toEqual([
+      path('2026-11_faktura-202611.json'),
+      path('2026-11_faktura-202611.pdf'),
+      path('json/2026-11_faktura-202611.json'),
+      path('pdf/2026-11_faktura-202611.pdf'),
+    ])
   })
 
   it('cancelling deletes nothing', async () => {

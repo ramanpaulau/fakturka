@@ -12,25 +12,28 @@ export interface Backend {
   /** Full path of the main data file (a `.bak` sits next to it). */
   dataFilePath(): Promise<string>
   defaultInvoiceDir(): Promise<string>
+  /** Writes `<dir>/pdf/<baseName>.pdf` and `<dir>/json/<baseName>.json` all or nothing, creating the sub-folders as needed. */
   writeInvoice(dir: string, baseName: string, pdf: Uint8Array, json: string): Promise<void>
   listDir(dir: string): Promise<DirEntry[]>
   readText(path: string): Promise<string>
   trash(paths: string[]): Promise<void>
   deletePaths(paths: string[]): Promise<void>
   /**
-   * Safe folder move (Rust `move_invoices`): copies + verifies every name, then deletes the originals.
+   * Safe folder move (Rust `move_invoices`): copies + verifies every name, then deletes the originals. Names are paths
+   * relative to the folders (`x.pdf`, `pdf/x.pdf`, `json/x.json`; see `isValidRelName` in layout.ts) and keep their relative path.
    * A name that already exists in `to` and is not in `overwrite` rejects with "Konflikt: <name>" before anything is copied.
    */
   moveInvoices(from: string, to: string, names: string[], overwrite: string[]): Promise<{ moved: number }>
   /**
-   * Writes a backup zip (Rust `export_zip`): `faktury/<file>` for every name in `files` (read from `dir`) plus `faktura-data.json`.
+   * Writes a backup zip (Rust `export_zip`): `faktury/<file name>` for every relative name in `files` (read from `dir`, e.g.
+   * `pdf/x.pdf` is stored as `faktury/x.pdf`) plus `faktura-data.json`. Two names with one file name reject.
    * Written to a temporary file first, so a failure never leaves a broken or half-replaced zip at `dest`.
    */
   exportZip(dir: string, files: string[], dataJson: string, dest: string): Promise<void>
   /** Lists a backup zip (Rust `zip_list`). Only `faktury/<plain name>.json|.pdf` entries and the root data file count; oversized invoice JSONs are skipped. */
   zipList(path: string): Promise<ZipContents>
   /**
-   * Extracts `faktury/<name>` for every name into `destDir` (Rust `zip_extract`), all or nothing. Names must be plain `.json`/`.pdf`
+   * Extracts `faktury/<name>` for every name into `destDir` (Rust `zip_extract`), PDFs into `pdf/`, JSONs into `json/`, all or nothing. Names must be plain `.json`/`.pdf`
    * file names that exist in the zip, otherwise it rejects before writing anything. Like `moveInvoices`, a name that already exists in
    * `destDir` (case-insensitive) and is not in `overwrite` rejects with "Konflikt: <name>" before anything is written.
    * A zip with two `faktury/` entries of the same name (case-insensitive) is rejected by `zipList` and `zipExtract`.

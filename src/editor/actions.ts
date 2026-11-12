@@ -2,7 +2,7 @@ import { savedData } from '../app/state'
 import { newInvoiceFrom } from '../domain/newInvoice'
 import type { Invoice, InvoiceRecord } from '../domain/types'
 import { getBackend } from '../storage/backend'
-import { findConflict, invoiceBaseName, listInvoices, resolveInvoiceDir, saveInvoice } from '../storage/invoiceStore'
+import { findConflict, invoicePdfPath, listInvoices, resolveInvoiceDir, saveInvoice } from '../storage/invoiceStore'
 import { confirmDialog } from '../ui/Dialog'
 import { toast } from '../ui/Toast'
 import { editorReady, editorSession, invoice, isSaved, loadedNumber, loadIntoEditor, refreshTakenNumbers, takenNumbers } from './editorState'
@@ -72,7 +72,7 @@ async function doSave(): Promise<boolean> {
     const { renderInvoicePdf } = await import('../pdf/renderPdf')
     const pdf = await renderInvoicePdf(saved)
     await saveInvoice(b, dir, saved, pdf, existing)
-    lastPdfPath = b.join(dir, `${invoiceBaseName(saved)}.pdf`)
+    lastPdfPath = invoicePdfPath(b, dir, saved)
     if (editorSession() !== session) {
       // Another invoice was loaded (or the folder changed) meanwhile: the record is written, but the sheet is not it.
     } else if (invoice.value === inv) {

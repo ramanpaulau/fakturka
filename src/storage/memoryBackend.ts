@@ -1,4 +1,5 @@
 import type { Backend, DataLoadResult, DirEntry, ZipContents } from './backend'
+import { flatName, importRelName, isValidRelName, JSON_DIR, PDF_DIR } from './layout'
 
 function isValidJson(s: string): boolean {
   try { JSON.parse(s); return true } catch { return false }
@@ -85,8 +86,8 @@ export class MemoryBackend implements Backend {
     if (this.failWritesUnder !== undefined && dir.startsWith(this.failWritesUnder)) {
       throw new Error('Nelze zapsat soubor')
     }
-    this.put(this.join(dir, `${baseName}.pdf`), pdf)
-    this.put(this.join(dir, `${baseName}.json`), json)
+    this.put(this.join(this.join(dir, PDF_DIR), `${baseName}.pdf`), pdf)
+    this.put(this.join(this.join(dir, JSON_DIR), `${baseName}.json`), json)
   }
 
   async listDir(dir: string): Promise<DirEntry[]> {
@@ -120,7 +121,7 @@ export class MemoryBackend implements Backend {
 
   async moveInvoices(from: string, to: string, names: string[], overwrite: string[]): Promise<{ moved: number }> {
     for (const n of [...names, ...overwrite]) {
-      if (n === '' || n === '.' || n === '..' || /[/\\\0:]/.test(n)) throw new Error(`Neplatný název souboru: ${n}`)
+      if (!isValidRelName(n)) throw new Error(`Neplatný název souboru: ${n}`)
     }
     const norm = (d: string) => d.replace(/\/+$/, '')
     if (norm(from) === norm(to)) throw new Error('Zdrojová a cílová složka je stejná')
@@ -141,14 +142,17 @@ export class MemoryBackend implements Backend {
 
   async exportZip(dir: string, files: string[], dataJson: string, dest: string): Promise<void> {
     const unique = [...new Set(files)]
+    const flat = new Set<string>()
     for (const f of unique) {
-      if (!validInvoiceFile(f)) throw new Error(`Neplatný název souboru: ${f}`)
+      if (!isValidRelName(f) || !validInvoiceFile(flatName(f))) throw new Error(`Neplatný název souboru: ${f}`)
+      if (flat.has(flatName(f).toLowerCase())) throw new Error(`Soubor ${flatName(f)} je ve složce s fakturami dvakrát`)
+      flat.add(flatName(f).toLowerCase())
     }
     const entries = new Map<string, Uint8Array | string>()
     for (const f of unique) {
       const c = this.files.get(this.join(dir, f))
       if (c === undefined) throw new Error(`Nelze načíst soubor ${this.join(dir, f)}`)
-      entries.set(`faktury/${f}`, c)
+      entries.set(`faktury/${flatName(f)}`, c)
     }
     entries.set('faktura-data.json', dataJson)
     this.zips.set(dest, entries)
@@ -185,9 +189,11 @@ export class MemoryBackend implements Backend {
     // The file system lookup of the Rust side is case-insensitive on Windows and macOS, so match the same way.
     const existing = new Set([...this.files.keys()].map(k => k.toLowerCase()))
     for (const n of unique) {
-      if (!overwrite.includes(n) && existing.has(this.join(destDir, n).toLowerCase())) throw new Error(`Konflikt: ${n}`)
+      // Like zipio.rs: a legacy (0.2.0) file of that name in the folder itself conflicts as well.
+      const clash = existing.has(this.join(destDir, importRelName(n)).toLowerCase()) || existing.has(this.join(destDir, n).toLowerCase())
+      if (!overwrite.includes(n) && clash) throw new Error(`Konflikt: ${n}`)
     }
-    for (const n of unique) this.put(this.join(destDir, n), zip.get(`faktury/${n}`)!)
+    for (const n of unique) this.put(this.join(destDir, importRelName(n)), zip.get(`faktury/${n}`)!)
   }
 
   async pickSavePath(defaultName: string): Promise<string | null> {

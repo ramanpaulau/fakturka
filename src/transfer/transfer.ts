@@ -6,7 +6,8 @@ import { plural } from '../history/historyModel'
 import { fileName } from '../settings/folderMove'
 import { getBackend, type ZipContents } from '../storage/backend'
 import { emptySavedData, parseSavedData, saveSavedData } from '../storage/dataStore'
-import { listInvoices, parseInvoice, recordBaseName, recordPaths, resolveInvoiceDir } from '../storage/invoiceStore'
+import { listInvoices, parseInvoice, primaryPaths, recordBaseName, recordPaths, resolveInvoiceDir } from '../storage/invoiceStore'
+import { importRelName, relativeName } from '../storage/layout'
 import { choiceDialog } from '../ui/Dialog'
 import { toast } from '../ui/Toast'
 
@@ -112,13 +113,13 @@ export function applySavedMerge(current: SavedData, plan: ImportPlan): SavedData
 export type Choice = 'keep' | 'replace'
 
 export type Extraction = {
-  /** Zip entry names (flattened) to extract into the invoice folder. */
+  /** Zip entry names (flattened) to extract into the invoice folder (PDFs land in `pdf/`, JSONs in `json/`). */
   names: string[]
   /** The subset of `names` that may replace an existing file: the files of invoices the user chose to replace. */
   overwrite: string[]
   /** Existing records the extraction replaces (their invoices are overwritten or trashed). */
   replaced: InvoiceRecord[]
-  /** Files of replaced records that the extraction does not overwrite (same invoice number under another file name). */
+  /** Files of replaced records that the extraction does not overwrite: same invoice number under another file name, or legacy (0.2.0) files in the folder itself. */
   leftovers: string[]
 }
 
@@ -126,7 +127,7 @@ export type Extraction = {
  * Turns the plan and the user's decisions (keyed by `ImportPlan.invoices[].name`) into the extraction. An invoice whose
  * decision is 'keep' is left out; a conflict without a decision is kept, so nothing is overwritten by accident.
  */
-export function buildExtraction(plan: ImportPlan, zip: ZipContents, existing: InvoiceRecord[], decisions: ReadonlyMap<string, Choice>): Extraction {
+export function buildExtraction(plan: ImportPlan, zip: ZipContents, existing: InvoiceRecord[], decisions: ReadonlyMap<string, Choice>, dir: string): Extraction {
   const pdfByLower = new Map(zip.pdfNames.map(n => [lower(n), n]))
   const jsonByBase = new Map(zip.invoiceJsons.map(([n]) => [lower(jsonBase(n)), n]))
   const names: string[] = []
@@ -146,8 +147,12 @@ export function buildExtraction(plan: ImportPlan, zip: ZipContents, existing: In
     }
   }
   names.push(...plan.pdfOnly)
-  const written = new Set(names.map(lower))
-  const leftovers = [...new Set(replaced.flatMap(recordPaths))].filter(p => !written.has(lower(fileName(p))))
+  // Compared by relative path: a legacy `x.json` is not overwritten by the import's `json/x.json`. A path that cannot be named is never trashed.
+  const written = new Set(names.map(n => lower(importRelName(n))))
+  const leftovers = [...new Set(replaced.flatMap(recordPaths))].filter(p => {
+    const rel = relativeName(dir, p)
+    return rel !== null && !written.has(lower(rel))
+  })
   return { names, overwrite, replaced, leftovers }
 }
 
@@ -167,7 +172,13 @@ export async function exportAll(): Promise<boolean> {
     if (!dest) return false
     const dir = await resolveInvoiceDir(b, data)
     const records = await listInvoices(b, dir)
-    const files = [...new Set(records.flatMap(r => recordPaths(r).map(fileName)))]
+    // Paths relative to the folder (`pdf/x.pdf`, legacy `x.pdf`); the zip stores them flat. Older legacy copies that a
+    // newer file of the same name shadows are left out, so every file name is in the zip once.
+    const files = [...new Set(records.flatMap(primaryPaths).map(p => {
+      const rel = relativeName(dir, p)
+      if (rel === null) throw new Error(`Neplatný název souboru: ${p}`)
+      return rel
+    }))]
     await b.exportZip(dir, files, JSON.stringify(data, null, 2), dest)
     toast('Export hotov')
     return true
@@ -290,7 +301,7 @@ export async function importFromZip(opts: { onboarding?: boolean } = {}): Promis
     decisions.set(inv.name, choice)
   }
 
-  const { names, overwrite, replaced, leftovers } = buildExtraction(plan, zip, existing, decisions)
+  const { names, overwrite, replaced, leftovers } = buildExtraction(plan, zip, existing, decisions, dir)
   if (names.length === 0 && Object.values(plan.newEntries).every(l => l.length === 0)) {
     toast('Nic se neimportovalo, všechny faktury zůstaly stávající.', 'warning')
     return false

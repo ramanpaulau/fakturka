@@ -42,6 +42,11 @@ function zipOf(invoices: Invoice[], data: SavedData | null, extra: [string, stri
   return m
 }
 
+/** Where an import (or a 0.2.1 save) puts an invoice's files. */
+const newJson = (i: Invoice) => `${DIR}/json/${base(i)}.json`
+const newPdf = (i: Invoice) => `${DIR}/pdf/${base(i)}.pdf`
+const record2 = (i: Invoice): InvoiceRecord => ({ kind: 'invoice', invoice: i, jsonPath: newJson(i), pdfPath: newPdf(i), baseName: base(i) })
+
 const contents = (over: Partial<ZipContents> = {}): ZipContents => ({ invoiceJsons: [], pdfNames: [], dataJson: null, ...over })
 const record = (i: Invoice, pdf = true): InvoiceRecord => ({
   kind: 'invoice', invoice: i, jsonPath: `${DIR}/${base(i)}.json`, pdfPath: pdf ? `${DIR}/${base(i)}.pdf` : null, baseName: base(i),
@@ -157,26 +162,33 @@ describe('buildExtraction', () => {
 
   it('keeps conflicts unless they are replaced, and always extracts non-conflicting files', () => {
     const plan = planImport(zip, emptySavedData(), [record(zipInv)])
-    expect(buildExtraction(plan, zip, [record(zipInv)], new Map()).names).toEqual(['lone.pdf'])
-    expect(buildExtraction(plan, zip, [record(zipInv)], new Map([[base(zipInv), 'keep']])).names).toEqual(['lone.pdf'])
-    const replace = buildExtraction(plan, zip, [record(zipInv)], new Map([[base(zipInv), 'replace']]))
+    expect(buildExtraction(plan, zip, [record(zipInv)], new Map(), DIR).names).toEqual(['lone.pdf'])
+    expect(buildExtraction(plan, zip, [record(zipInv)], new Map([[base(zipInv), 'keep']]), DIR).names).toEqual(['lone.pdf'])
+    const replace = buildExtraction(plan, zip, [record2(zipInv)], new Map([[base(zipInv), 'replace']]), DIR)
     expect(replace.names).toEqual([`${base(zipInv)}.json`, `${base(zipInv)}.pdf`, 'lone.pdf'])
     expect(replace.leftovers).toEqual([])
+  })
+
+  it('replacing a legacy (0.2.0) record of the same name trashes its files in the folder itself, since the import writes json/ and pdf/', () => {
+    const plan = planImport(zip, emptySavedData(), [record(zipInv)])
+    const r = buildExtraction(plan, zip, [record(zipInv)], new Map([[base(zipInv), 'replace']]), DIR)
+    expect(r.overwrite).toEqual([`${base(zipInv)}.json`, `${base(zipInv)}.pdf`])
+    expect(r.leftovers).toEqual([`${DIR}/${base(zipInv)}.json`, `${DIR}/${base(zipInv)}.pdf`])
   })
 
   it('a replace leaves the old pair behind under another name as a leftover to trash', () => {
     const old = inv('202611', '2026-10-31')
     const plan = planImport(zip, emptySavedData(), [record(old)])
-    const r = buildExtraction(plan, zip, [record(old)], new Map([[base(zipInv), 'replace']]))
+    const r = buildExtraction(plan, zip, [record(old)], new Map([[base(zipInv), 'replace']]), DIR)
     expect(r.leftovers).toEqual([`${DIR}/${base(old)}.json`, `${DIR}/${base(old)}.pdf`])
   })
 
   it('a replace by a JSON-only invoice also removes the old PDF with the same base name', () => {
     const jsonOnly = contents({ invoiceJsons: [[`${base(zipInv)}.json`, json(zipInv)]] })
-    const plan = planImport(jsonOnly, emptySavedData(), [record(zipInv)])
-    const r = buildExtraction(plan, jsonOnly, [record(zipInv)], new Map([[base(zipInv), 'replace']]))
+    const plan = planImport(jsonOnly, emptySavedData(), [record2(zipInv)])
+    const r = buildExtraction(plan, jsonOnly, [record2(zipInv)], new Map([[base(zipInv), 'replace']]), DIR)
     expect(r.names).toEqual([`${base(zipInv)}.json`])
-    expect(r.leftovers).toEqual([`${DIR}/${base(zipInv)}.pdf`])
+    expect(r.leftovers).toEqual([newPdf(zipInv)])
   })
 })
 
@@ -204,6 +216,31 @@ describe('exportAll', () => {
       'faktury/lone.pdf',
     ])
     expect(JSON.parse(z.get('faktura-data.json') as string).suppliers).toEqual([supplier])
+  })
+
+  it('exports invoices from json/, pdf/ and the folder itself with flat names, each file name once', async () => {
+    savedData.value = full()
+    const a = inv('202611')
+    const b2 = inv('202612', '2026-12-31')
+    putInvoice({ ...a, amount: 1 }) // legacy copy, shadowed by the newer one below
+    backend().files.set(newJson(a), json({ ...a, amount: 2 }))
+    backend().files.set(newPdf(a), new Uint8Array([2]))
+    backend().files.set(newJson(b2), json(b2))
+    backend().files.set(`${DIR}/${base(b2)}.pdf`, new Uint8Array([3])) // legacy PDF paired with the new JSON
+    backend().files.set(`${DIR}/pdf/lone.pdf`, new Uint8Array([7]))
+    backend().pickedSavePath = '/out.zip'
+    expect(await exportAll()).toBe(true)
+    const z = backend().zips.get('/out.zip')!
+    expect([...z.keys()].sort()).toEqual([
+      'faktura-data.json',
+      `faktury/${base(a)}.json`,
+      `faktury/${base(a)}.pdf`,
+      `faktury/${base(b2)}.json`,
+      `faktury/${base(b2)}.pdf`,
+      'faktury/lone.pdf',
+    ])
+    expect(JSON.parse(z.get(`faktury/${base(a)}.json`) as string).amount).toBe(2)
+    expect(z.get(`faktury/${base(b2)}.pdf`)).toEqual(new Uint8Array([3]))
   })
 
   it('does nothing when the save dialog is cancelled', async () => {
@@ -281,10 +318,14 @@ describe('importFromZip', () => {
     expect(await screen.findByText('Faktura 202612 už ve složce s fakturami je.')).toBeInTheDocument()
     click('Nahradit')
     expect(await done).toBe(true)
-    const amount = (i: Invoice) => JSON.parse(backend().files.get(`${DIR}/${base(i)}.json`) as string).amount
-    expect(amount(keep)).toBe(1)
-    expect(amount(replace)).toBe(222)
-    expect(backend().files.get(`${DIR}/${base(replace)}.pdf`)).toEqual(new Uint8Array([9, 9]))
+    const amount = (path: string) => JSON.parse(backend().files.get(path) as string).amount
+    expect(amount(`${DIR}/${base(keep)}.json`)).toBe(1)
+    expect(amount(newJson(replace))).toBe(222)
+    expect(backend().files.get(newPdf(replace))).toEqual(new Uint8Array([9, 9]))
+    // the replaced legacy (0.2.0) files do not linger in the folder itself
+    expect(backend().files.has(`${DIR}/${base(replace)}.json`)).toBe(false)
+    expect(backend().files.has(`${DIR}/${base(replace)}.pdf`)).toBe(false)
+    expect((await listInvoices(backend(), DIR)).map(r => r.kind === 'invoice' && r.invoice.amount).sort()).toEqual([1, 222])
   })
 
   it('replacing an invoice with the same number from another month trashes the old pair only after extraction', async () => {
@@ -303,7 +344,7 @@ describe('importFromZip', () => {
     click('Nahradit')
     expect(await done).toBe(true)
     expect(trash).toHaveBeenCalledWith([`${DIR}/${base(old)}.json`, `${DIR}/${base(old)}.pdf`])
-    expect([...backend().files.keys()].sort()).toEqual([`${DIR}/${base(incoming)}.json`, `${DIR}/${base(incoming)}.pdf`])
+    expect([...backend().files.keys()].sort()).toEqual([newJson(incoming), newPdf(incoming)])
   })
 
   it('a failed extraction keeps the old files, writes no saved data and shows an error', async () => {
@@ -354,7 +395,7 @@ describe('importFromZip', () => {
     expect(await screen.findByText(/Záloha obsahuje: 1 faktura,/)).toBeInTheDocument()
     click('Importovat')
     expect(await done).toBe(true)
-    expect([...backend().files.keys()].sort()).toEqual([`${DIR}/${base(inv('202611'))}.json`, `${DIR}/${base(inv('202611'))}.pdf`])
+    expect([...backend().files.keys()].sort()).toEqual([newJson(inv('202611')), newPdf(inv('202611'))])
   })
 
   it('a zip with nothing new says so', async () => {
@@ -397,8 +438,45 @@ describe('importFromZip', () => {
     expect(screen.getByTestId('toast')).toHaveAttribute('data-kind', 'error')
     expect(backend().files.get(`${DIR}/${base(i)}.json`)).toBe('{corrupt')
     expect(backend().files.has(`${DIR}/${base(i)}.pdf`)).toBe(false)
+    expect(backend().files.has(newJson(i))).toBe(false)
+    expect(backend().files.has(newPdf(i))).toBe(false)
     expect(backend().dataFile).toBeNull()
     expect(savedData.value).toEqual(mine)
+  })
+
+  it('also refuses when the unreadable file is in json/', async () => {
+    savedData.value = { ...emptySavedData(), suppliers: [supplier] }
+    const i = inv('202611')
+    backend().files.set(newJson(i), '{corrupt')
+    backend().zips.set('/z.zip', zipOf([i], full()))
+    backend().pickedZip = '/z.zip'
+    mountHost()
+    const done = importFromZip()
+    await screen.findByText('Importovat ze zálohy')
+    click('Importovat')
+    expect(await done).toBe(false)
+    expect(backend().files.get(newJson(i))).toBe('{corrupt')
+    expect(backend().files.has(newPdf(i))).toBe(false)
+  })
+
+  it('sees a new-layout invoice as a conflict, and replacing it overwrites it in place', async () => {
+    savedData.value = emptySavedData()
+    const i = inv('202611')
+    backend().files.set(newJson(i), json({ ...i, amount: 1 }))
+    backend().files.set(newPdf(i), new Uint8Array([1]))
+    backend().zips.set('/z.zip', zipOf([{ ...i, amount: 5 }], null))
+    backend().pickedZip = '/z.zip'
+    const trash = vi.spyOn(backend(), 'trash')
+    mountHost()
+    const done = importFromZip()
+    await screen.findByText('Importovat ze zálohy')
+    click('Importovat')
+    await screen.findByText('Faktura 202611 už ve složce s fakturami je.')
+    click('Nahradit')
+    expect(await done).toBe(true)
+    expect(trash).not.toHaveBeenCalled()
+    expect(JSON.parse(backend().files.get(newJson(i)) as string).amount).toBe(5)
+    expect([...backend().files.keys()].sort()).toEqual([newJson(i), newPdf(i)])
   })
 
   it('only names the user chose to replace may overwrite (extraction gets exactly those)', async () => {
@@ -443,7 +521,7 @@ describe('importFromZip', () => {
     click('Importovat')
     expect(await done).toBe(true)
     expect(backend().files.get(`${DIR}/lone.pdf`)).toEqual(new Uint8Array([7]))
-    expect(backend().files.has(`${DIR}/lone2.pdf`)).toBe(true)
+    expect(backend().files.has(`${DIR}/pdf/lone2.pdf`)).toBe(true)
   })
 
   it('a conflict by file name with a different invoice number names the file in the dialog', async () => {
@@ -553,7 +631,7 @@ describe('importFromZip', () => {
       expect(written.settings).toEqual({ ...zipSettings, invoiceDir: null })
       expect(savedData.value).toEqual(written)
       // the invoices went to the default folder, not to the path from the other machine
-      expect(backend().files.has(`${DIR}/${base(inv('202611'))}.json`)).toBe(true)
+      expect(backend().files.has(newJson(inv('202611')))).toBe(true)
       expect([...backend().files.keys()].some(k => k.startsWith('/elsewhere'))).toBe(false)
     })
 

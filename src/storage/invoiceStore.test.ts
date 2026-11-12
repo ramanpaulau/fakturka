@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { MemoryBackend } from './memoryBackend'
-import { findConflict, invoiceBaseName, listInvoices, loadInvoice, parseInvoice, resolveInvoiceDir, saveInvoice } from './invoiceStore'
+import { findConflict, invoiceBaseName, invoicePdfPath, listInvoices, loadInvoice, parseInvoice, recordPaths, resolveInvoiceDir, saveInvoice } from './invoiceStore'
 import { toSnap } from '../domain/entities'
 import { DEFAULT_SETTINGS } from '../domain/types'
 import type { Invoice, SavedData } from '../domain/types'
@@ -64,8 +64,8 @@ describe('listInvoices', () => {
     const r = list[0]
     expect(r.kind).toBe('invoice')
     if (r.kind === 'invoice') {
-      expect(r.pdfPath).toBe('/faktury/2026-11_faktura-202611.pdf')
-      expect(r.jsonPath).toBe('/faktury/2026-11_faktura-202611.json')
+      expect(r.pdfPath).toBe('/faktury/pdf/2026-11_faktura-202611.pdf')
+      expect(r.jsonPath).toBe('/faktury/json/2026-11_faktura-202611.json')
       expect(r.baseName).toBe('2026-11_faktura-202611')
       expect(r.invoice.number).toBe('202611')
     }
@@ -106,7 +106,10 @@ describe('listInvoices', () => {
   it('does not list files from other directories', async () => {
     const b = new MemoryBackend()
     b.files.set('/faktury/sub/a.pdf', pdf)
+    b.files.set('/faktury/pdf/sub/c.pdf', pdf)
+    b.files.set('/faktury/PDF/d.pdf', pdf)
     b.files.set('/faktury2/b.pdf', pdf)
+    b.files.set('/faktury2/pdf/e.pdf', pdf)
     expect(await listInvoices(b, DIR)).toEqual([])
   })
 
@@ -122,14 +125,85 @@ describe('listInvoices', () => {
   })
 })
 
+describe('listInvoices across json/, pdf/ and the legacy folder root', () => {
+  const J = (i: Invoice) => JSON.stringify(i)
+  const base = '2026-11_faktura-1'
+
+  it('still lists a legacy root pair (0.1.0/0.2.0 layout) with its root paths', async () => {
+    const b = new MemoryBackend()
+    b.files.set(`/faktury/${base}.json`, J(inv('1', '2026-11-30')))
+    b.files.set(`/faktury/${base}.pdf`, pdf)
+    expect(await listInvoices(b, DIR)).toEqual([
+      { kind: 'invoice', invoice: inv('1', '2026-11-30'), jsonPath: `/faktury/${base}.json`, pdfPath: `/faktury/${base}.pdf`, baseName: base },
+    ])
+  })
+
+  it('pairs a json/ JSON with a root PDF and a root JSON with a pdf/ PDF', async () => {
+    const b = new MemoryBackend()
+    b.files.set(`/faktury/json/${base}.json`, J(inv('1', '2026-11-30')))
+    b.files.set(`/faktury/${base}.pdf`, pdf)
+    b.files.set('/faktury/2026-10_faktura-2.json', J(inv('2', '2026-10-30')))
+    b.files.set('/faktury/pdf/2026-10_faktura-2.pdf', pdf)
+    const list = await listInvoices(b, DIR)
+    expect(list.map(r => r.kind === 'invoice' && [r.jsonPath, r.pdfPath])).toEqual([
+      [`/faktury/json/${base}.json`, `/faktury/${base}.pdf`],
+      ['/faktury/2026-10_faktura-2.json', '/faktury/pdf/2026-10_faktura-2.pdf'],
+    ])
+  })
+
+  it('shows a base name saved in both layouts once, preferring the new files and keeping the legacy ones in the record', async () => {
+    const b = new MemoryBackend()
+    b.files.set(`/faktury/${base}.json`, J({ ...inv('1', '2026-11-30'), amount: 1 }))
+    b.files.set(`/faktury/${base}.pdf`, pdf)
+    b.files.set(`/faktury/json/${base}.json`, J({ ...inv('1', '2026-11-30'), amount: 2 }))
+    b.files.set(`/faktury/pdf/${base}.pdf`, pdf)
+    const list = await listInvoices(b, DIR)
+    expect(list).toHaveLength(1)
+    const r = list[0]
+    if (r.kind !== 'invoice') throw new Error('expected an invoice')
+    expect(r.invoice.amount).toBe(2)
+    expect(r.jsonPath).toBe(`/faktury/json/${base}.json`)
+    expect(r.pdfPath).toBe(`/faktury/pdf/${base}.pdf`)
+    expect(recordPaths(r).sort()).toEqual([`/faktury/${base}.json`, `/faktury/${base}.pdf`, `/faktury/json/${base}.json`, `/faktury/pdf/${base}.pdf`])
+  })
+
+  it('falls back to the legacy JSON when the new one is not a readable invoice', async () => {
+    const b = new MemoryBackend()
+    b.files.set(`/faktury/${base}.json`, J(inv('1', '2026-11-30')))
+    b.files.set(`/faktury/json/${base}.json`, '{broken')
+    b.files.set(`/faktury/pdf/${base}.pdf`, pdf)
+    const list = await listInvoices(b, DIR)
+    expect(list).toHaveLength(1)
+    expect(list[0].kind === 'invoice' && [list[0].jsonPath, list[0].pdfPath]).toEqual([`/faktury/${base}.json`, `/faktury/pdf/${base}.pdf`])
+  })
+
+  it('lists a lone PDF in pdf/ and the root once, as one pdfOnly record holding both files', async () => {
+    const b = new MemoryBackend()
+    b.files.set('/faktury/pdf/sken.pdf', pdf)
+    b.files.set('/faktury/sken.pdf', pdf)
+    b.files.set('/faktury/pdf/other.pdf', pdf)
+    const list = await listInvoices(b, DIR)
+    expect(list.map(r => r.kind === 'pdfOnly' && r.pdfPath)).toEqual(['/faktury/pdf/other.pdf', '/faktury/pdf/sken.pdf'])
+    expect(recordPaths(list[1]).sort()).toEqual(['/faktury/pdf/sken.pdf', '/faktury/sken.pdf'])
+  })
+
+  it('ignores PDFs in json/ and JSONs in pdf/', async () => {
+    const b = new MemoryBackend()
+    b.files.set('/faktury/json/x.pdf', pdf)
+    b.files.set('/faktury/pdf/y.json', J(inv('1', '2026-11-30')))
+    expect(await listInvoices(b, DIR)).toEqual([])
+  })
+})
+
 describe('saveInvoice', () => {
   it('writes both files and loadInvoice reads it back', async () => {
     const b = new MemoryBackend()
     const i = inv('202611', '2026-11-30')
     const res = await saveInvoice(b, DIR, i, pdf, [])
     expect(res).toEqual({ replaced: false })
-    expect(b.files.get('/faktury/2026-11_faktura-202611.pdf')).toEqual(pdf)
-    expect(await loadInvoice(b, '/faktury/2026-11_faktura-202611.json')).toEqual(i)
+    expect(b.files.get('/faktury/pdf/2026-11_faktura-202611.pdf')).toEqual(pdf)
+    expect(await loadInvoice(b, '/faktury/json/2026-11_faktura-202611.json')).toEqual(i)
+    expect(invoicePdfPath(b, DIR, i)).toBe('/faktury/pdf/2026-11_faktura-202611.pdf')
   })
 
   it('loadInvoice throws on a non-invoice file', async () => {
@@ -144,7 +218,7 @@ describe('saveInvoice', () => {
     const existing = await listInvoices(b, DIR)
     const res = await saveInvoice(b, DIR, inv('202611', '2026-12-01'), pdf, existing)
     expect(res).toEqual({ replaced: true })
-    expect([...b.files.keys()].sort()).toEqual(['/faktury/2026-12_faktura-202611.json', '/faktury/2026-12_faktura-202611.pdf'])
+    expect([...b.files.keys()].sort()).toEqual(['/faktury/json/2026-12_faktura-202611.json', '/faktury/pdf/2026-12_faktura-202611.pdf'])
   })
 
   it('reports replaced and keeps the files when overwriting the same base name', async () => {
@@ -182,6 +256,52 @@ describe('saveInvoice', () => {
   })
 })
 
+describe('saving a legacy (0.2.0) invoice again', () => {
+  const legacy = (b: MemoryBackend, i: Invoice) => {
+    b.files.set(`/faktury/${invoiceBaseName(i)}.json`, JSON.stringify(i))
+    b.files.set(`/faktury/${invoiceBaseName(i)}.pdf`, pdf)
+  }
+
+  it('moves it to the new layout: the pair is written to pdf/ and json/ and the legacy root files are deleted', async () => {
+    const b = new MemoryBackend()
+    legacy(b, inv('202611', '2026-11-30'))
+    legacy(b, inv('202610', '2026-10-31'))
+    const existing = await listInvoices(b, DIR)
+    const res = await saveInvoice(b, DIR, { ...inv('202611', '2026-11-30'), amount: 999 }, pdf, existing)
+    expect(res).toEqual({ replaced: true })
+    expect([...b.files.keys()].sort()).toEqual([
+      '/faktury/2026-10_faktura-202610.json',
+      '/faktury/2026-10_faktura-202610.pdf',
+      '/faktury/json/2026-11_faktura-202611.json',
+      '/faktury/pdf/2026-11_faktura-202611.pdf',
+    ])
+    const list = await listInvoices(b, DIR)
+    expect(list.map(r => r.kind === 'invoice' && [r.invoice.number, r.invoice.amount, r.jsonPath])).toEqual([
+      ['202611', 999, '/faktury/json/2026-11_faktura-202611.json'],
+      ['202610', 1500, '/faktury/2026-10_faktura-202610.json'],
+    ])
+  })
+
+  it('also deletes legacy files shadowed by a newer copy of the same base name', async () => {
+    const b = new MemoryBackend()
+    legacy(b, inv('202611', '2026-11-30'))
+    await saveInvoice(b, DIR, inv('202611', '2026-11-30'), pdf, []) // both layouts now hold 2026-11_faktura-202611
+    const existing = await listInvoices(b, DIR)
+    expect(existing).toHaveLength(1)
+    await saveInvoice(b, DIR, inv('202611', '2026-12-01'), pdf, existing)
+    expect([...b.files.keys()].sort()).toEqual(['/faktury/json/2026-12_faktura-202611.json', '/faktury/pdf/2026-12_faktura-202611.pdf'])
+  })
+
+  it('keeps the legacy files when the new write fails', async () => {
+    const b = new MemoryBackend()
+    legacy(b, inv('202611', '2026-11-30'))
+    const existing = await listInvoices(b, DIR)
+    b.failWritesUnder = '/faktury'
+    await expect(saveInvoice(b, DIR, inv('202611', '2026-11-30'), pdf, existing)).rejects.toThrow()
+    expect([...b.files.keys()].sort()).toEqual(['/faktury/2026-11_faktura-202611.json', '/faktury/2026-11_faktura-202611.pdf'])
+  })
+})
+
 describe('collisions between different numbers', () => {
   it('finds and replaces a record whose number sanitises to the same base name', async () => {
     const b = new MemoryBackend()
@@ -192,7 +312,7 @@ describe('collisions between different numbers', () => {
     expect(hit).toBe(existing[0])
     const res = await saveInvoice(b, DIR, incoming, pdf, existing)
     expect(res).toEqual({ replaced: true })
-    expect([...b.files.keys()].sort()).toEqual(['/faktury/2026-11_faktura-2026-11.json', '/faktury/2026-11_faktura-2026-11.pdf'])
+    expect([...b.files.keys()].sort()).toEqual(['/faktury/json/2026-11_faktura-2026-11.json', '/faktury/pdf/2026-11_faktura-2026-11.pdf'])
     const list = await listInvoices(b, DIR)
     expect(list).toHaveLength(1)
     expect(list[0].kind === 'invoice' && list[0].invoice.number).toBe('2026/11')
@@ -207,8 +327,8 @@ describe('collisions between different numbers', () => {
     const res = await saveInvoice(b, DIR, incoming, pdf, existing)
     expect(res.replaced).toBe(true)
     // the new pair must exist (MemoryBackend is case-sensitive, so the old lower-case pair may linger or be gone)
-    expect(b.files.has('/faktury/2026-11_faktura-A1.json')).toBe(true)
-    expect(b.files.has('/faktury/2026-11_faktura-A1.pdf')).toBe(true)
+    expect(b.files.has('/faktury/json/2026-11_faktura-A1.json')).toBe(true)
+    expect(b.files.has('/faktury/pdf/2026-11_faktura-A1.pdf')).toBe(true)
   })
 
   it('finds a lone PDF with the same base name', () => {

@@ -90,7 +90,7 @@ export function SettingsPage() {
   const moveTo = async (from: string, to: string): Promise<{ moved: number } | null> => {
     const b = getBackend()
     const [fromRecords, toRecords] = await Promise.all([listInvoices(b, from), listInvoices(b, to)])
-    const conflicts = findMoveConflicts(fromRecords, toRecords)
+    const conflicts = findMoveConflicts(fromRecords, toRecords, from)
     const decisions: Decision[] = []
     for (const conflict of conflicts) {
       const choice = await choiceDialog({
@@ -104,7 +104,7 @@ export function SettingsPage() {
       if (choice === null) return null
       decisions.push({ conflict, choice })
     }
-    const { names, overwrite, leftovers } = planMove(fromRecords, decisions)
+    const { names, overwrite, leftovers } = planMove(fromRecords, decisions, from, to)
     if (names.length === 0) return { moved: 0 }
     setMoving(true)
     try {

@@ -1,4 +1,4 @@
-use crate::files::sibling_with_suffix;
+use crate::files::{sibling_with_suffix, JSON_DIR, PDF_DIR};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
@@ -16,6 +16,29 @@ pub(crate) fn validate_name(name: &str) -> Result<(), String> {
         return Err(format!("Neplatný název souboru: {name}"));
     }
     Ok(())
+}
+
+/// A path relative to the invoice folder: a plain file name (a file in the folder itself, the 0.1.0/0.2.0 layout) or
+/// `pdf/<name>` / `json/<name>` (exactly one of these lowercase prefixes, a forward slash, then a plain name).
+pub(crate) fn validate_rel_name(rel: &str) -> Result<(), String> {
+    match rel.split_once('/') {
+        None => validate_name(rel),
+        Some((sub, name)) if (sub == PDF_DIR || sub == JSON_DIR) && validate_name(name).is_ok() => Ok(()),
+        Some(_) => Err(format!("Neplatný název souboru: {rel}")),
+    }
+}
+
+/// `base` joined with a name that passed `validate_rel_name`, one component at a time (no `/` handed to Windows).
+pub(crate) fn rel_path(base: &Path, rel: &str) -> PathBuf {
+    match rel.split_once('/') {
+        Some((sub, name)) => base.join(sub).join(name),
+        None => base.join(rel),
+    }
+}
+
+/// The sub-folder a relative name lives in, if any.
+fn rel_subdir(rel: &str) -> Option<&str> {
+    rel.split_once('/').map(|(sub, _)| sub)
 }
 
 fn exists_at_all(p: &Path) -> bool {
@@ -107,7 +130,8 @@ fn delete_sources(pairs: &[(PathBuf, PathBuf)]) -> Vec<String> {
     left
 }
 
-/// Moves the named files from `from` to `to`, all or nothing as far as the originals are concerned:
+/// Moves the named files (relative paths, see `validate_rel_name`) from `from` to the same relative path in `to`,
+/// all or nothing as far as the originals are concerned:
 ///
 /// 1. Every name is copied to a temporary name in `to`, fsynced and verified (size + bytes).
 /// 2. Only when all copies are verified are they renamed into place. A name listed in `overwrite`
@@ -119,7 +143,7 @@ fn delete_sources(pairs: &[(PathBuf, PathBuf)]) -> Vec<String> {
 /// A failure in 3 (see `delete_sources`) keeps the verified copies: the data is safe in `to`, the error tells which originals remain.
 fn move_between(from: &Path, to: &Path, names: &[String], overwrite: &[String]) -> Result<MoveReport, String> {
     for n in names.iter().chain(overwrite) {
-        validate_name(n)?;
+        validate_rel_name(n)?;
     }
     let mut seen = HashSet::new();
     let names: Vec<&String> = names.iter().filter(|n| seen.insert(n.as_str())).collect();
@@ -132,7 +156,7 @@ fn move_between(from: &Path, to: &Path, names: &[String], overwrite: &[String]) 
         }
     }
     for n in &names {
-        if !overwrite.contains(n.as_str()) && exists_at_all(&to.join(n)) {
+        if !overwrite.contains(n.as_str()) && exists_at_all(&rel_path(to, n)) {
             return Err(format!("Konflikt: {n}"));
         }
     }
@@ -143,6 +167,24 @@ fn move_between(from: &Path, to: &Path, names: &[String], overwrite: &[String]) 
     fs::create_dir_all(to).map_err(|e| format!("Nelze vytvořit složku: {e}"))?;
     if fs::canonicalize(to).map_err(|e| e.to_string())? == from_real {
         return Err("Zdrojová a cílová složka je stejná".to_string());
+    }
+    // The `pdf`/`json` sub-folders the names need; those created here are taken away again on failure (after `to`'s own
+    // missing ancestors in the list, so the reverse order removes them first).
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for sub in [PDF_DIR, JSON_DIR] {
+        if names.iter().any(|n| rel_subdir(n) == Some(sub)) {
+            let d = to.join(sub);
+            if !d.exists() {
+                if let Err(e) = fs::create_dir(&d) {
+                    for d in missing_dirs.iter().rev() {
+                        let _ = fs::remove_dir(d);
+                    }
+                    return Err(format!("Nelze vytvořit složku: {e}"));
+                }
+                missing_dirs.push(d.clone());
+            }
+            subdirs.push(d);
+        }
     }
 
     let mut temps: Vec<PathBuf> = Vec::new();
@@ -157,26 +199,25 @@ fn move_between(from: &Path, to: &Path, names: &[String], overwrite: &[String]) 
     };
 
     // Step 1: copy + verify everything.
-    let mut plan: Vec<(PathBuf, PathBuf, PathBuf, bool)> = Vec::new(); // (source, temp, target, replaces)
+    let mut plan: Vec<(PathBuf, PathBuf, PathBuf, bool, &str)> = Vec::new(); // (source, temp, target, replaces, name)
     for n in &names {
-        let target = to.join(n);
+        let target = rel_path(to, n);
         let tmp = sibling_with_suffix(&target, ".moving");
-        if let Err(e) = copy_verified(&from.join(n), &tmp, &mut temps) {
+        if let Err(e) = copy_verified(&rel_path(from, n), &tmp, &mut temps) {
             rollback(&temps, &placed);
             return Err(e);
         }
-        plan.push((from.join(n), tmp, target, overwrite.contains(n.as_str())));
+        plan.push((rel_path(from, n), tmp, target, overwrite.contains(n.as_str()), n.as_str()));
     }
 
     // Step 2: rename into place. Targets that appeared since the first check are conflicts, not overwrites.
-    for (_, _, target, replaces) in &plan {
+    for (_, _, target, replaces, name) in &plan {
         if !replaces && exists_at_all(target) {
             rollback(&temps, &placed);
-            let name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
             return Err(format!("Konflikt: {name}"));
         }
     }
-    for (_, tmp, target, replaces) in &plan {
+    for (_, tmp, target, replaces, _) in &plan {
         if let Err(e) = fs::rename(tmp, target) {
             rollback(&temps, &placed);
             return Err(format!("Nelze přesunout soubor {}: {e}", target.display()));
@@ -187,9 +228,12 @@ fn move_between(from: &Path, to: &Path, names: &[String], overwrite: &[String]) 
         }
     }
     sync_dir(to);
+    for d in &subdirs {
+        sync_dir(d);
+    }
 
     // Step 3: everything is in place and verified, so the originals can go.
-    let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(source, _, target, _)| (source.clone(), target.clone())).collect();
+    let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|(source, _, target, _, _)| (source.clone(), target.clone())).collect();
     let left = delete_sources(&pairs);
     if !left.is_empty() {
         return Err(format!("{PARTIAL_MARKER}, ale původní soubory zůstaly na místě: {}", left.join(", ")));
@@ -351,6 +395,77 @@ mod tests {
         }
         assert!(move_between(&from, &to, &s(&["a.pdf"]), &s(&["../x"])).is_err());
         assert_eq!(listing(&from), ["a.pdf"]);
+        assert!(listing(&to).is_empty());
+    }
+
+    #[test]
+    fn moves_subfolder_names_to_the_same_relative_path_creating_the_subfolders() {
+        let (_root, from, to) = setup();
+        fs::create_dir(from.join("pdf")).unwrap();
+        fs::create_dir(from.join("json")).unwrap();
+        fs::write(from.join("pdf").join("a.pdf"), b"pdf-a").unwrap();
+        fs::write(from.join("json").join("a.json"), b"{\"a\":1}").unwrap();
+        fs::write(from.join("old.pdf"), b"legacy").unwrap();
+        let r = move_between(&from, &to, &s(&["pdf/a.pdf", "json/a.json", "old.pdf"]), &[]).unwrap();
+        assert_eq!(r.moved, 3);
+        assert_eq!(fs::read(to.join("pdf").join("a.pdf")).unwrap(), b"pdf-a");
+        assert_eq!(fs::read(to.join("json").join("a.json")).unwrap(), b"{\"a\":1}");
+        assert_eq!(fs::read(to.join("old.pdf")).unwrap(), b"legacy");
+        assert_eq!(listing(&to), ["json", "old.pdf", "pdf"]);
+        assert!(listing(&from.join("pdf")).is_empty());
+        assert!(listing(&from.join("json")).is_empty());
+        assert_eq!(listing(&from), ["json", "pdf"]);
+    }
+
+    #[test]
+    fn subfolder_conflict_and_overwrite_work_per_relative_path() {
+        let (_root, from, to) = setup();
+        fs::create_dir(from.join("pdf")).unwrap();
+        fs::create_dir(to.join("pdf")).unwrap();
+        fs::write(from.join("pdf").join("a.pdf"), b"new-a").unwrap();
+        fs::write(to.join("pdf").join("a.pdf"), b"old-a").unwrap();
+        // a root file of the same name is a different relative path, not a conflict
+        fs::write(to.join("a.pdf"), b"legacy-a").unwrap();
+        let e = move_between(&from, &to, &s(&["pdf/a.pdf"]), &[]).unwrap_err();
+        assert_eq!(e, "Konflikt: pdf/a.pdf");
+        assert_eq!(fs::read(to.join("pdf").join("a.pdf")).unwrap(), b"old-a");
+        // overwrite names the relative path; a bare file name does not cover it
+        assert_eq!(move_between(&from, &to, &s(&["pdf/a.pdf"]), &s(&["a.pdf"])).unwrap_err(), "Konflikt: pdf/a.pdf");
+        move_between(&from, &to, &s(&["pdf/a.pdf"]), &s(&["pdf/a.pdf"])).unwrap();
+        assert_eq!(fs::read(to.join("pdf").join("a.pdf")).unwrap(), b"new-a");
+        assert_eq!(fs::read(to.join("a.pdf")).unwrap(), b"legacy-a");
+        assert!(listing(&from.join("pdf")).is_empty());
+    }
+
+    #[test]
+    fn failure_removes_the_subfolders_it_created() {
+        let (_root, from, to) = setup();
+        fs::create_dir(from.join("pdf")).unwrap();
+        fs::write(from.join("pdf").join("a.pdf"), b"x").unwrap();
+        assert!(move_between(&from, &to, &s(&["pdf/a.pdf", "json/gone.json"]), &[]).is_err());
+        assert!(listing(&to).is_empty(), "{:?}", listing(&to));
+        assert_eq!(fs::read(from.join("pdf").join("a.pdf")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn accepts_only_plain_names_or_one_pdf_or_json_prefix() {
+        for ok in ["a.pdf", "pdf/a.pdf", "json/a.json", "pdf/a.json"] {
+            assert!(validate_rel_name(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "pdf/", "json/", "/a.pdf", "pdf//a.pdf", "pdf/../a.pdf", "pdf/..", "pdf/.", "pdf/sub/a.pdf", "PDF/a.pdf",
+            "Json/a.json", "other/a.pdf", "pdf\\a.pdf", "pdf/a\\b.pdf", "pdf/C:a.pdf", "C:pdf/a.pdf", "../a.pdf",
+            "..", ".", "",
+        ] {
+            assert!(validate_rel_name(bad).is_err(), "{bad:?}");
+        }
+        let (_root, from, to) = setup();
+        fs::create_dir(from.join("pdf")).unwrap();
+        fs::write(from.join("pdf").join("a.pdf"), b"x").unwrap();
+        for bad in ["pdf/../pdf/a.pdf", "pdf\\a.pdf", "x/a.pdf"] {
+            assert!(move_between(&from, &to, &s(&[bad]), &[]).is_err(), "{bad:?}");
+            assert!(move_between(&from, &to, &s(&["pdf/a.pdf"]), &s(&[bad])).is_err(), "{bad:?}");
+        }
         assert!(listing(&to).is_empty());
     }
 

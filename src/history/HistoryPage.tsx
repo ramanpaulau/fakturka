@@ -10,7 +10,7 @@ import { editorReady, forgetLoadedRecord, isSaved, loadedNumber, loadIntoEditor,
 import { Sheet } from '../sheet/Sheet'
 import { exportAll, importFromZip } from '../transfer/transfer'
 import { getBackend } from '../storage/backend'
-import { listInvoices, loadInvoice, resolveInvoiceDir } from '../storage/invoiceStore'
+import { listInvoices, loadInvoice, recordPaths, resolveInvoiceDir } from '../storage/invoiceStore'
 import { Button } from '../ui/Button'
 import { confirmDialog } from '../ui/Dialog'
 import { IconButton } from '../ui/IconButton'
@@ -261,7 +261,8 @@ export function HistoryPage() {
         danger: true,
       })
       if (!ok) return
-      await getBackend().trash(r.kind === 'invoice' ? (r.pdfPath ? [r.jsonPath, r.pdfPath] : [r.jsonPath]) : [r.pdfPath])
+      // Every file of the record, including an older copy saved by 0.2.0 in the folder itself.
+      await getBackend().trash(recordPaths(r))
       if (r.kind === 'invoice' && r.invoice.number === loadedNumber.value) {
         // The editor still shows it, but it is no longer saved anywhere.
         forgetLoadedRecord()

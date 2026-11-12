@@ -180,12 +180,20 @@ fn stage(path: &Path, bytes: &[u8]) -> io::Result<()> {
     f.sync_all()
 }
 
-/// Writes `<base>.pdf` and `<base>.json` all-or-nothing: both are staged as
-/// `.tmp` files first, so a failed write never leaves a lone PDF or JSON.
+/// Sub-folders of the invoice folder that new saves write to (0.1.0/0.2.0 wrote both files into the folder itself).
+pub(crate) const PDF_DIR: &str = "pdf";
+pub(crate) const JSON_DIR: &str = "json";
+
+/// Writes `pdf/<base>.pdf` and `json/<base>.json` all-or-nothing, creating both sub-folders as needed: both files
+/// are staged as `.tmp` files in their own folder first, so a failed write never leaves a lone PDF or JSON.
 /// If the second rename fails, the first target is restored to its previous state.
 fn write_pair(dir: &Path, base: &str, pdf: &[u8], json: &[u8]) -> io::Result<()> {
-    let pdf_path = dir.join(format!("{base}.pdf"));
-    let json_path = dir.join(format!("{base}.json"));
+    let pdf_dir = dir.join(PDF_DIR);
+    let json_dir = dir.join(JSON_DIR);
+    fs::create_dir_all(&pdf_dir)?;
+    fs::create_dir_all(&json_dir)?;
+    let pdf_path = pdf_dir.join(format!("{base}.pdf"));
+    let json_path = json_dir.join(format!("{base}.json"));
     let pdf_tmp = sibling_with_suffix(&pdf_path, ".tmp");
     let json_tmp = sibling_with_suffix(&json_path, ".tmp");
     let pdf_old = sibling_with_suffix(&pdf_path, ".old");
@@ -400,40 +408,69 @@ mod tests {
         assert!(r.is_empty());
     }
 
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
     #[test]
-    fn write_pair_writes_both_files_and_no_temps() {
+    fn write_pair_writes_into_pdf_and_json_subfolders_and_leaves_no_temps() {
         let dir = tempfile::tempdir().unwrap();
         write_pair(dir.path(), "x", b"pdf", b"{}").unwrap();
-        assert_eq!(fs::read(dir.path().join("x.pdf")).unwrap(), b"pdf");
-        assert_eq!(fs::read(dir.path().join("x.json")).unwrap(), b"{}");
-        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(names.len(), 2);
+        assert_eq!(fs::read(dir.path().join("pdf").join("x.pdf")).unwrap(), b"pdf");
+        assert_eq!(fs::read(dir.path().join("json").join("x.json")).unwrap(), b"{}");
+        assert_eq!(names_in(dir.path()), ["json", "pdf"]);
+        assert_eq!(names_in(&dir.path().join("pdf")), ["x.pdf"]);
+        assert_eq!(names_in(&dir.path().join("json")), ["x.json"]);
+    }
+
+    #[test]
+    fn write_pair_leaves_a_legacy_root_pair_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("x.pdf"), b"legacy").unwrap();
+        fs::write(dir.path().join("x.json"), b"{\"v\":0}").unwrap();
+        write_pair(dir.path(), "x", b"new", b"{\"v\":1}").unwrap();
+        assert_eq!(fs::read(dir.path().join("x.pdf")).unwrap(), b"legacy");
+        assert_eq!(fs::read(dir.path().join("pdf").join("x.pdf")).unwrap(), b"new");
     }
 
     #[test]
     fn write_pair_leaves_no_orphan_pdf_when_json_target_is_unwritable() {
         let dir = tempfile::tempdir().unwrap();
         // a directory at the JSON target makes the rename fail
-        fs::create_dir(dir.path().join("x.json")).unwrap();
+        fs::create_dir_all(dir.path().join("json").join("x.json")).unwrap();
         assert!(write_pair(dir.path(), "x", b"pdf", b"{}").is_err());
-        assert!(!dir.path().join("x.pdf").exists());
-        let tmps: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".tmp") || n.ends_with(".old"))
-            .collect();
-        assert!(tmps.is_empty(), "leftovers: {tmps:?}");
+        assert!(!dir.path().join("pdf").join("x.pdf").exists());
+        for sub in ["pdf", "json"] {
+            let left: Vec<_> = names_in(&dir.path().join(sub))
+                .into_iter()
+                .filter(|n| n.ends_with(".tmp") || n.ends_with(".old"))
+                .collect();
+            assert!(left.is_empty(), "leftovers in {sub}: {left:?}");
+        }
     }
 
     #[test]
     fn write_pair_restores_existing_pdf_when_json_target_is_unwritable() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("x.pdf"), b"old").unwrap();
-        fs::create_dir(dir.path().join("x.json")).unwrap();
+        fs::create_dir(dir.path().join("pdf")).unwrap();
+        fs::write(dir.path().join("pdf").join("x.pdf"), b"old").unwrap();
+        fs::create_dir_all(dir.path().join("json").join("x.json")).unwrap();
         assert!(write_pair(dir.path(), "x", b"new", b"{}").is_err());
-        assert_eq!(fs::read(dir.path().join("x.pdf")).unwrap(), b"old");
-        assert!(!dir.path().join("x.pdf.tmp").exists());
-        assert!(!dir.path().join("x.pdf.old").exists());
+        assert_eq!(fs::read(dir.path().join("pdf").join("x.pdf")).unwrap(), b"old");
+        assert_eq!(names_in(&dir.path().join("pdf")), ["x.pdf"]);
+        assert_eq!(names_in(&dir.path().join("json")), ["x.json"]);
+    }
+
+    #[test]
+    fn write_pair_fails_cleanly_when_a_subfolder_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        // a file named `json` blocks the folder
+        fs::write(dir.path().join("json"), b"in the way").unwrap();
+        assert!(write_pair(dir.path(), "x", b"pdf", b"{}").is_err());
+        assert!(!dir.path().join("pdf").join("x.pdf").exists());
+        assert_eq!(fs::read(dir.path().join("json")).unwrap(), b"in the way");
     }
 
     #[test]
@@ -441,8 +478,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_pair(dir.path(), "x", b"old", b"{\"v\":1}").unwrap();
         write_pair(dir.path(), "x", b"new", b"{\"v\":2}").unwrap();
-        assert_eq!(fs::read(dir.path().join("x.pdf")).unwrap(), b"new");
-        assert_eq!(fs::read_to_string(dir.path().join("x.json")).unwrap(), "{\"v\":2}");
-        assert!(!dir.path().join("x.pdf.old").exists());
+        assert_eq!(fs::read(dir.path().join("pdf").join("x.pdf")).unwrap(), b"new");
+        assert_eq!(fs::read_to_string(dir.path().join("json").join("x.json")).unwrap(), "{\"v\":2}");
+        assert_eq!(names_in(&dir.path().join("pdf")), ["x.pdf"]);
     }
 }

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "suppliers": [
+    {
+      "id": "s1",
+      "name": "Jan Novák",
+      "street": "Dlouhá 12",
+      "city": "110 00 Praha",
+      "ico": "12345679",
+      "dic": "CZ12345679",
+      "note": "Fyzická osoba zapsaná v živnostenském rejstříku"
+    }
+  ],
+  "customers": [
+    {
+      "id": "c1",
+      "name": "Příklad s.r.o.",
+      "street": "Krátká 5",
+      "city": "602 00 Brno",
+      "ico": "25596641",
+      "dic": "CZ25596641",
+      "note": ""
+    }
+  ],
+  "payments": [
+    {
+      "id": "p1",
+      "method": "Převodem",
+      "bank": "Fiktivní banka",
+      "account": "123456789/0100"
+    }
+  ],
+  "texts": [
+    {
+      "id": "t1",
+      "text": "Fakturuji Vám za vývoj softwaru v listopadu 2026"
+    }
+  ],
+  "settings": {
+    "invoiceDir": null,
+    "theme": "dark",
+    "dueRule": {
+      "kind": "daysAfterIssue",
+      "days": 21
+    },
+    "plusDays": 30,
+    "showDicDefault": false
+  }
+}

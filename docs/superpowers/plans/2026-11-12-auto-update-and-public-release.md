@@ -1,0 +1,212 @@
+# Fakturka: auto-update and public release Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Rename the app to Fakturka, make Windows copies update themselves from GitHub releases (download in the background, install at the next start), and publish the code in a clean public repo.
+
+**Architecture:** The update logic lives in Rust (`src-tauri/src/updates.rs`) on top of `tauri-plugin-updater`: a background command downloads and signature-checks a newer release and persists it in the app cache; at the next start a second command installs it. The frontend only asks "is an update pending?", shows a Czech install screen, and kicks off the background download after boot. GitHub Actions builds the signed NSIS installer and `latest.json` on a `v*` tag into a draft release.
+
+**Tech Stack:** Tauri 2 (`tauri-plugin-updater` 2, `semver` 1), Preact + TypeScript, Vitest, GitHub Actions (`windows-latest`, `tauri-apps/tauri-action@v0`), GitHub CLI.
+
+**Spec:** `docs/superpowers/specs/2026-11-12-auto-update-and-public-release-design.md`
+
+## Global Constraints
+
+- Product name `Fakturka`; app identifier `cz.fakturka.desktop`; Cargo package `fakturka`, lib `fakturka_lib`; npm package `fakturka`; repo `github.com/ramanpaulau/fakturka`.
+- Unchanged on purpose: the paper's title "Faktura", the folder `Dokumenty\Faktury`, invoice files `<RRRR-MM>_faktura-<číslo>.pdf/.json`, the data file `faktura-data.json`, the editor tab label "Faktura".
+- App UI is Czech only; README is English.
+- Updates: Windows release builds only (never macOS, the browser build, or `tauri dev`/debug builds).
+- Update endpoint: `https://github.com/ramanpaulau/fakturka/releases/latest/download/latest.json`.
+- Startup is never delayed by checking or downloading; only installing an already downloaded update shows a screen. The pre-install check has a 5 s timeout.
+- Errors in updating are silent: no dialog, no toast, no error code; the app works normally.
+- First public version: `0.2.0`. Versions are `x.y.z`, kept equal in `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`.
+- Signing private key and its password never enter the repo, a log, a commit, or the chat. Key file: `~/.tauri/fakturka.key` (public key `~/.tauri/fakturka.key.pub`).
+- No commit carrying Raman's work email is ever pushed, and its domain is never written into a tracked file (derive it at run time: `git log -1 --format=%ae archive/main-initial | cut -d@ -f2`). Public commits use `<id>+ramanpaulau@users.noreply.github.com`.
+- Creating the GitHub repo, every push, setting secrets and pushing tags are outward-facing: stop and get Raman's explicit go-ahead first.
+- Commit messages: subject line only, no body, no trailers (user's global rule).
+- Local Mac builds (`CI=true npm run tauri build`) keep working without the signing key.
+
+## Review Focus
+
+1. Offline (or GitHub down) at start with a downloaded update waiting → the app opens normally within ~5 s and keeps the download for the next start. Pinned in Task 4 (`startup: install fails → app boots`) and Task 3 (`install_pending keeps the pending update on a network error` is a manual note; the pure part is tested).
+2. The waiting download is not newer than the running version (already installed, or Raman installed a newer setup by hand) → it is discarded, no install loop. Pinned in Task 3 (`pending_version: not newer → cleared`).
+3. A half-written or garbled pending update (app killed mid-write, disk full) → ignored and cleared, the app opens. Pinned in Task 3 (`read_pending: missing bin / bad meta → None`).
+4. The background download fails or the app is closed during it → nothing half-done is recorded as pending. Pinned in Task 3 (`write_pending is all-or-nothing`).
+5. A tag that does not match the version in the files → CI fails before building anything. Pinned in Task 5 (`checkVersions` tests) and used in Task 6.
+
+---
+
+## Prerequisite H1 (Raman, interactive, before Task 3)
+
+The signing key pair, generated on Raman's Mac. Claude never sees the password.
+
+- [ ] Raman runs `! npx tauri signer generate -w ~/.tauri/fakturka.key` and chooses a password (prompted).
+- [ ] Raman stores the key file and password in his password manager (losing them means no installed copy can ever update again).
+- [ ] The controller reads only the **public** key: `cat ~/.tauri/fakturka.key.pub` (safe to show) and passes it to Task 3.
+
+---
+
+### Task 1: Rename to Fakturka, disclaimer in O aplikaci, ignore rules
+
+**Files:**
+- Modify: `src-tauri/tauri.conf.json` (`productName`, `identifier`, window `title`), `src-tauri/Cargo.toml` (`name`, `description = "Fakturka - invoice desktop app"`, `[lib] name`), `src-tauri/src/main.rs` (`fakturka_lib::run()`), `src-tauri/Cargo.lock` (regenerated by cargo), `package.json` + `package-lock.json` (`name`), `index.html` (`<title>`), `src/app/TopBar.tsx` (logo text), `src/settings/SettingsPage.tsx` (O aplikaci), `src/pdf/renderPdf.ts` (`setCreator`/`setProducer`), `src/onboarding/Onboarding.tsx` (welcome `h1`), `.gitignore`
+- Test: `src/app/TopBar.test.tsx`, `src/settings/SettingsPage.test.tsx`, `src/onboarding/Onboarding.test.tsx`, PDF tests that assert creator/producer (grep)
+
+**Interfaces:** Produces the names in Global Constraints; later tasks use `fakturka_lib` and `cz.fakturka.desktop`.
+
+- [ ] **Step 1: Update the tests first**
+  - TopBar: `screen.getByText('Fakturka', { selector: '.logo' })`; the tab button is still named `'Faktura'`.
+  - Settings, O aplikaci: text `Fakturka, verze` with the version; `getByText('Aplikace vytvořená s pomocí AI (vibecoding) pro osobní použití. Bez záruky a bez podpory.')`; `getByText('github.com/ramanpaulau/fakturka')` (plain text, not a link); authors line unchanged (`Autoři: Raman Paulau a Claude Opus`).
+  - Onboarding: heading `Vítejte ve Fakturce`.
+  - PDF: creator and producer `'Fakturka'`; title still `Faktura <number>`.
+- [ ] **Step 2: Run `npx vitest run src/app src/settings src/onboarding src/pdf`**: expected FAIL on the new strings.
+- [ ] **Step 3: Make the changes** listed under Files. `.gitignore` gains `.idea/` and `*.zip`. Do not touch the strings listed as unchanged in Global Constraints. Leave the README alone (Task 7).
+- [ ] **Step 4: Verify.** `npm test` all pass; `source ~/.cargo/env && cargo test --manifest-path src-tauri/Cargo.toml` passes; `npm run build` OK; `grep -rn "cz.faktura.desktop\|faktura_lib" src src-tauri/src src-tauri/*.json src-tauri/Cargo.toml index.html` prints nothing.
+- [ ] **Step 5: Commit** `git commit -m "feat: rename the app to Fakturka"`
+
+### Task 2: v0.1.0 data compatibility fixtures
+
+**Files:**
+- Create: `src/test/fixtures/v0.1.0/faktura-data.json`, `src/test/fixtures/v0.1.0/2026-11_faktura-202611.json`, `src/storage/compat.test.ts`
+
+**Interfaces:** Consumes `parseSavedData(json: string): SavedData | null` (`src/storage/dataStore.ts`) and `parseInvoice(json: string): Invoice | null` (`src/storage/invoiceStore.ts`).
+
+- [ ] **Step 1: Create the fixtures** in the exact shape v0.1.0 wrote, recreated from git (`git show a91e4eb~1:src/domain/types.ts` for the settings shape): the data file has `schemaVersion: 1`, one supplier, one customer, one payment, one text, and settings `{ invoiceDir: null, theme: 'system', dueRule: { kind: 'dayOfNextMonth', day: 15 }, plusDays: 30, showDicDefault: true }`. Fake values only (`Jan Novák`, IČO `12345679`, `Příklad s.r.o.`, IČO `25596641`, account `123456789/0100`).
+- [ ] **Step 2: Write `compat.test.ts`**
+  - `v0.1.0 data file loads`: `parseSavedData(fixture)` is not null; `suppliers.length === 1`; `settings.dueRule` equals `{ kind: 'dayOfNextMonth', day: 15 }`; `settings.showDicDefault === true`.
+  - `v0.1.0 invoice loads`: `parseInvoice(fixture)` is not null; its `number === '202611'`, `amount` and `customer.ico` equal the fixture's.
+- [ ] **Step 3: Run `npx vitest run src/storage/compat.test.ts`**: expected PASS (the current code already reads them; the test pins it for future releases). If it fails, the current code broke compatibility: stop and report.
+- [ ] **Step 4: Commit** `git commit -m "test: pin loading of data written by v0.1.0"`
+
+### Task 3: Rust update engine and updater config
+
+**Files:**
+- Create: `src-tauri/src/updates.rs`, `src-tauri/tauri.release.conf.json`
+- Modify: `src-tauri/Cargo.toml` (deps `tauri-plugin-updater = "2"`, `semver = "1"`), `src-tauri/src/lib.rs` (register plugin + commands), `src-tauri/tauri.conf.json`
+
+**Interfaces:**
+- Consumes: the public key from H1.
+- Produces Tauri commands (camelCase-free, called by Task 4 via `invoke`):
+  - `update_pending() -> Option<String>`: the version of a downloaded update that is newer than the running app, else `None` (also `None` when updates are disabled).
+  - `update_install_pending(app) -> Result<(), String>`: installs it; on success the process exits/restarts and the promise may never settle.
+  - `update_download(app) -> Result<Option<String>, String>`: checks and downloads in the background; `Ok(Some(version))` when an update is now pending.
+- Pure helpers (unit-tested, `pub(crate)`):
+  - `fn updates_enabled() -> bool`: `cfg!(windows) && !cfg!(debug_assertions)`.
+  - `fn is_newer(candidate: &str, current: &str) -> bool`: semver compare; unparsable → `false`.
+  - `fn write_pending(dir: &Path, version: &str, bytes: &[u8]) -> io::Result<()>`
+  - `fn read_pending(dir: &Path) -> Option<(String, PathBuf)>`: version and path of the bytes.
+  - `fn clear_pending(dir: &Path)`
+  - `fn pending_version(dir: &Path, current: &str) -> Option<String>`: `read_pending`, then if not `is_newer(v, current)` → `clear_pending` and `None`.
+- Storage: `<app_cache_dir>/update/pending.bin` and `pending.json` (`{ "version": "0.3.0" }`).
+
+- [ ] **Step 1: Write the failing Rust tests** in `updates.rs` (`#[cfg(test)]`, `tempfile::tempdir()`):
+  - `is_newer`: `("0.3.0","0.2.0") → true`, `("0.2.0","0.2.0") → false`, `("0.1.9","0.2.0") → false`, `("garbage","0.2.0") → false`.
+  - `write_pending then read_pending` returns `("0.3.0", path)` and the file holds the bytes.
+  - `read_pending: missing bin / bad meta → None`: meta without bin → `None`; bin with `pending.json` = `"{"` → `None`; empty dir → `None`.
+  - `write_pending is all-or-nothing`: after a successful write there are no `*.tmp` files left; the meta is written last (write bin.tmp → rename → meta.tmp → rename), so a crash before the meta leaves `read_pending == None`. Test by writing only `pending.bin` and asserting `None`.
+  - `pending_version: not newer → cleared`: pending `0.2.0` with current `0.2.0` → `None` and both files gone; pending `0.3.0` with current `0.2.0` → `Some("0.3.0")`.
+- [ ] **Step 2: Run `cargo test --manifest-path src-tauri/Cargo.toml updates`**: FAIL (module missing).
+- [ ] **Step 3: Implement the helpers** (atomic writes as in `files.rs`), then the commands with `tauri_plugin_updater::UpdaterExt` (check the API of the resolved version on docs.rs):
+  - `update_pending`: if `!updates_enabled()` → `None`; else `pending_version(cache_dir/update, app.package_info().version)`.
+  - `update_install_pending`: `app.updater_builder().timeout(5 s).build()?.check().await`. Network/any error → `Err` and **keep** the pending files. `None`, or a version different from the pending one → `clear_pending` and `Err("stale")`. Same version → read the bytes, `update.install(bytes)`, then `app.restart()` (on Windows `install` already ends the process).
+  - `update_download`: if `!updates_enabled()` → `Ok(None)`. Check with a 300 s timeout builder; `None` → `Ok(None)`. If `pending_version` already equals the found version → `Ok(Some(v))`. Else `update.download(..)` (it verifies the signature; an invalid signature is an `Err`, nothing written), then `write_pending` and `Ok(Some(v))`.
+  - `lib.rs`: `.plugin(tauri_plugin_updater::Builder::new().build())` and the three commands in `generate_handler!`. No JS updater permissions are added to capabilities (the frontend never calls the plugin directly; narrower than the spec's "updater permissions").
+- [ ] **Step 4: Config.**
+  - `tauri.conf.json`: `bundle.windows.nsis.installMode = "currentUser"`; `plugins.updater = { "pubkey": "<H1 public key>", "endpoints": ["https://github.com/ramanpaulau/fakturka/releases/latest/download/latest.json"], "windows": { "installMode": "passive" } }`. `bundle.createUpdaterArtifacts` stays unset/false so local builds need no key.
+  - `tauri.release.conf.json`: `{ "bundle": { "createUpdaterArtifacts": true } }` (merged by CI with `--config`).
+- [ ] **Step 5: Verify.** `cargo test` passes; `npm test` passes; `CI=true npm run tauri build` on the Mac still produces the app (proves no key is needed locally).
+- [ ] **Step 6: Commit** `git commit -m "feat: background update download and install-at-start engine"`
+
+### Task 4: Startup flow and install screen
+
+**Files:**
+- Create: `src/app/updates.ts`, `src/app/UpdateScreen.tsx`, `src/app/updates.test.ts`
+- Modify: `src/app/App.tsx`, `src/ui/theme.css` (screen styles, both themes), `src/app/App.test.tsx`
+
+**Interfaces:**
+- Consumes the three commands from Task 3.
+- Produces in `updates.ts`:
+  - `pendingUpdate(): Promise<string | null>`: `null` outside Tauri (`'__TAURI_INTERNALS__' in window` false) or on any error.
+  - `installPendingUpdate(): Promise<void>`: rejects on failure.
+  - `downloadUpdateInBackground(): void`: fire-and-forget, swallows every error, runs at most once per app session.
+- `UpdateScreen({ version }: { version: string })`: centered card, `h1` `Instaluji novou verzi {version}…`, an indeterminate progress bar (`role="progressbar"`, `aria-label="Instalace aktualizace"`, no `aria-valuenow`), a hint line `Aplikace se za chvíli sama znovu spustí.`
+
+- [ ] **Step 1: Write the failing tests** (mock `@tauri-apps/api/core` `invoke`; set/unset `window.__TAURI_INTERNALS__`):
+  - `pendingUpdate returns null outside Tauri` and does not call `invoke`.
+  - `pendingUpdate returns the version` when `invoke('update_pending')` resolves `'0.3.0'`; returns `null` when it rejects.
+  - `downloadUpdateInBackground calls update_download once` even when called twice; a rejection produces no toast and no thrown error.
+  - App: `startup with a pending update shows the install screen` (heading `Instaluji novou verzi 0.3.0…`, progressbar named `Instalace aktualizace`) before onboarding/editor, and calls `update_install_pending`.
+  - App: `startup: install fails → app boots` (install rejects → the onboarding or editor appears; no toast, no dialog).
+  - App: `startup without a pending update boots straight away` and calls `update_download` once after the data loaded (both for `ok` and `fresh` boot).
+- [ ] **Step 2: Run `npx vitest run src/app`**: FAIL.
+- [ ] **Step 3: Implement.** In `App`, a first boot phase before `loadSavedData`: `pendingUpdate()` → if a version, render `UpdateScreen` and `await installPendingUpdate()`; on rejection continue the normal boot. After the boot reaches `ok` or `fresh`, call `downloadUpdateInBackground()`. Apply the theme before the update screen (it follows the OS theme, like the fresh screen).
+- [ ] **Step 4: Verify.** `npm test`, `npx tsc --noEmit`, `npm run build` pass. In the browser dev build (`npx vite`) the app boots as before (no update calls outside Tauri).
+- [ ] **Step 5: Commit** `git commit -m "feat: install a downloaded update at start, download the next one in the background"`
+
+### Task 5: Version scripts
+
+**Files:**
+- Create: `scripts/version-lib.mjs`, `scripts/version-lib.test.mjs`, `scripts/release.mjs`, `scripts/check-version.mjs`
+- Modify: `package.json` (`"release": "node scripts/release.mjs"`), `vite.config.ts` (`test.include` adds `"scripts/**/*.test.mjs"`)
+
+**Interfaces:** Produces for Task 6: `node scripts/check-version.mjs <tag>` exits 0 when `<tag>` is `v` + the version in all five files, else exits 1 with a one-line message naming the mismatching file.
+
+`version-lib.mjs` exports pure functions over file contents (strings), no fs:
+- `readVersions(files: { packageJson, packageLock, tauriConf, cargoToml, cargoLock }) → { [name]: string }`
+- `setVersion(files, version) → files` (changes only the app's own version entries: `package.json` `version`; `package-lock.json` top-level `version` and `packages[""].version`; `tauri.conf.json` `version`; `Cargo.toml` `[package] version`; `Cargo.lock` the `[[package]] name = "fakturka"` entry).
+- `checkVersions(files, tag) → { ok: true } | { ok: false, message: string }`
+- `isValidVersion(v) → boolean` (`/^\d+\.\d+\.\d+$/`).
+
+- [ ] **Step 1: Write the failing tests** with small inline file strings:
+  - `setVersion` changes the five entries to `0.2.0` and nothing else (a dependency also at `0.1.0` in `Cargo.lock`/`package-lock.json` stays `0.1.0`).
+  - `checkVersions(files at 0.2.0, 'v0.2.0')` → ok; `'v0.2.1'` → not ok, message names the files; one file left at `0.1.0` → not ok naming that file; tag without `v` → not ok.
+  - `isValidVersion('0.2.0')` true; `'0.2'`, `'v0.2.0'`, `'0.2.0-beta'` false.
+- [ ] **Step 2: Run `npx vitest run scripts`**: FAIL.
+- [ ] **Step 3: Implement** the lib; `check-version.mjs` reads the five files and calls `checkVersions`; `release.mjs <version>`: refuses an invalid version, a version not greater than the current one, or a dirty working tree; writes the files, runs `git add` on them, `git commit -m "release: v<version>"`, `git tag v<version>`, prints the push command for Raman (`git push origin main v<version>`) and **does not push**.
+- [ ] **Step 4: Verify.** `npm test` passes; `node scripts/check-version.mjs v0.1.0` exits 0 on the current tree, `v9.9.9` exits 1.
+- [ ] **Step 5: Commit** `git commit -m "build: version bump and tag check scripts"`
+
+### Task 6: GitHub Actions workflows
+
+**Files:**
+- Create: `.github/workflows/release.yml`, `.github/workflows/ci.yml`
+
+**Interfaces:** Consumes `scripts/check-version.mjs` (Task 5), `src-tauri/tauri.release.conf.json` (Task 3); repo secrets `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (set in Task 8).
+
+- [ ] **Step 1: `ci.yml`**: on `push` to `main` and on `pull_request`; `runs-on: windows-latest`; steps: `actions/checkout@v4`; `actions/setup-node@v4` (`node-version: 22`, `cache: npm`); `dtolnay/rust-toolchain@stable`; `swatinem/rust-cache@v2` (`workspaces: src-tauri`); `npm ci`; `npm test`; `npm run build`; `cargo test --manifest-path src-tauri/Cargo.toml`. Gives Windows test coverage, which nothing else does.
+- [ ] **Step 2: `release.yml`**: on `push` tags `v*`; `permissions: contents: write`; `runs-on: windows-latest`; the same setup and tests as CI; then `node scripts/check-version.mjs ${{ github.ref_name }}`; then `tauri-apps/tauri-action@v0` with env `GITHUB_TOKEN`, `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (from secrets) and `with: tagName: ${{ github.ref_name }}`, `releaseName: Fakturka ${{ github.ref_name }}`, `releaseBody: See the README for installation.`, `releaseDraft: true`, `prerelease: false`, `includeUpdaterJson: true`, `updaterJsonPreferNsis: true`, `args: --bundles nsis --config src-tauri/tauri.release.conf.json`.
+- [ ] **Step 3: Verify locally** what can be verified: both files parse as YAML (`node -e "require('yaml')"` is not a dependency; use `python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))"` per file, or `npx --yes yaml-lint` if Python lacks yaml); every `${{ }}` secret name matches the Global Constraints. The real run happens in Task 8.
+- [ ] **Step 4: Commit** `git commit -m "ci: Windows tests on push, signed draft release on tags"`
+
+### Task 7: English README
+
+**Files:**
+- Modify: `README.md` (full rewrite in English)
+
+- [ ] **Step 1: Write the README** with these sections, translating the existing Czech content rather than dropping it:
+  1. `# Fakturka` + one-line description (simple Czech invoices for sole traders who are not VAT payers; Czech-only UI).
+  2. A clearly visible disclaimer near the top: vibecoded with AI (Claude), made for personal use by family and friends, Czech-only, provided as-is, no warranty, no support.
+  3. Install on Windows: download `Fakturka_<version>_x64-setup.exe` from the latest release; SmartScreen "More info → Run anyway" once; installs per user, no admin.
+  4. Updates: automatic; downloaded in the background, installed at the next start; nothing to do.
+  5. Where data lives: `%APPDATA%\cz.fakturka.desktop\` (`faktura-data.json`, `.bak`, `.corrupt`), invoices in `Documents\Faktury`; OneDrive note; backup/export.
+  6. Development: prerequisites (Node 22+, Rust, platform tools), the commands from the current README's Vývoj section, the note that `tauri dev` uses real data and fake examples to use.
+  7. Releasing (for the maintainer): `npm run release -- 0.3.0`, `git push origin main v0.3.0`, wait for the Action, test the draft, Publish; back up `~/.tauri/fakturka.key` and its password; losing them means no updates ever again.
+  8. Building on macOS locally (`CI=true npm run tauri build`) and a short note that Windows builds come from CI (the long manual Windows guide is dropped).
+  9. Project structure (translated).
+  10. Authors: Raman Paulau and Claude Opus.
+- [ ] **Step 2: Verify.** No Czech prose left except UI strings quoted as such; `grep -n "cz.faktura.desktop\|faktura.exe\|neověřeno" README.md` prints nothing; every command in it matches `package.json` scripts.
+- [ ] **Step 3: Commit** `git commit -m "docs: English README for the public repo"`
+
+### Task 8 (controller with Raman, outward-facing): publish and first release
+
+Not for an implementer subagent. The controller runs it, stopping for Raman's go-ahead at each **GATE**.
+
+- [ ] **Step 1: Final whole-branch review** of Tasks 1–7 (per subagent-driven-development) and all checks green: `npm test`, `npm run build`, `cargo test`, `node scripts/check-version.mjs v0.1.0`.
+- [ ] **Step 2: Version 0.2.0** with `npm run release -- 0.2.0` on `modernize` (this creates a local tag; delete it after Step 3, the public tag is made on the new history).
+- [ ] **Step 3: Fresh history.** `git branch -m main archive/main-initial`; `git checkout --orphan main`; set repo-local `user.email` to `<id>+ramanpaulau@users.noreply.github.com` (id from `gh api user --jq .id`) and `user.name` to `ramanpaulau`; `git commit -m "Fakturka 0.2.0"`; `git tag -d v0.2.0` (the one from Step 2 on `modernize`) then `git tag v0.2.0`; verify `git log --format='%ae' main` shows only the noreply address.
+- [ ] **Step 4: Pre-publish checks.** Run the PII scan (`…/scratchpad/pii/scan.sh` against `git ls-files` of `main`; prints counts only) and additionally `git grep -n -i -e "$(git log -1 --format=%ae archive/main-initial | cut -d@ -f2)" -e "$(whoami)" -e "/Users/" main` (expected: no hits). Confirm `git ls-files` contains no `.superpowers/`, `.idea/`, `*.zip`, `node_modules/`, `dist/`, `target/`.
+- [ ] **Step 5: GATE: create the repo.** Show Raman: name, public visibility, description. On yes: `gh repo create ramanpaulau/fakturka --public --description "Simple Czech invoices for non-VAT sole traders (vibecoded, personal use)"`, then `git remote add origin https://github.com/ramanpaulau/fakturka.git`.
+- [ ] **Step 6: Signing secrets.** Ask Raman to run `! gh auth refresh -s workflow` if the token still lacks the `workflow` scope (needed to push `.github/workflows`). Then `gh secret set TAURI_SIGNING_PRIVATE_KEY -R ramanpaulau/fakturka < ~/.tauri/fakturka.key` (the file content goes straight in, never printed) and Raman runs `! gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R ramanpaulau/fakturka` (prompts for the password).
+- [ ] **Step 7: GATE: push.** On yes: `git push -u origin main`. Watch `ci.yml` (`gh run watch`); it must be green on Windows. A red run stops here: fix on `main`, push again (each push is a new GATE).
+- [ ] **Step 8: GATE: tag.** On yes: `git push origin v0.2.0`. Watch `release.yml`; expected: a draft release "Fakturka v0.2.0" with `Fakturka_0.2.0_x64-setup.exe`, its `.sig`, and `latest.json` whose `platforms` has `windows-x86_64` pointing at the setup file.
+- [ ] **Step 9: Hand over.** Raman tests the draft's installer on a Windows PC (his dad's), then clicks Publish. Updates can only be proven with the next version: tell Raman that the first real update test is `v0.2.1`, and what to look for (start → background download → next start shows "Instaluji novou verzi 0.2.1…" → restarts in 0.2.1).

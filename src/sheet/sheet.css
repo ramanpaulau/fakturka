@@ -1,0 +1,333 @@
+/* The paper is always white with black text: no theme tokens here. */
+@font-face {
+  font-family: 'Faktura Roboto';
+  src: url('../pdf/fonts/Roboto-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+}
+@font-face {
+  font-family: 'Faktura Roboto';
+  src: url('../pdf/fonts/Roboto-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+}
+
+.sheet {
+  position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: #fff;
+  color: #000;
+  font-family: 'Faktura Roboto', sans-serif;
+  font-weight: 400;
+  font-kerning: none;
+  font-feature-settings: 'liga' 0, 'kern' 0;
+  text-rendering: optimizeSpeed;
+}
+.sheet * {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+.sheet .abs,
+.sheet .fit {
+  position: absolute;
+  white-space: pre;
+}
+.sheet .right {
+  text-align: right;
+}
+.sheet .center {
+  text-align: center;
+}
+.sheet .b,
+.sheet b {
+  font-weight: 700;
+}
+.sheet .rule {
+  position: absolute;
+  height: 0;
+  border-top: 0 solid #000;
+}
+.sheet .fit {
+  font-size: var(--fs);
+  overflow: hidden;
+  white-space: pre-line;
+  overflow-wrap: break-word;
+}
+.sheet .fit .p:empty::before {
+  content: '\200b';
+}
+
+/* The app's global input rule (32 px, themed surface) must not reach the paper. */
+.sheet input:not([type='checkbox']):not([type='radio']),
+.sheet select,
+.sheet textarea {
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+/*
+ * Edit mode: affordances only, nothing that changes layout (no borders, padding or outlines that the
+ * paper would not have). Fixed light colours, because the paper is white in both themes.
+ */
+.sheet[data-mode='edit'] .ed {
+  cursor: text;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.sheet[data-mode='edit'] .ed:hover {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: rgba(37, 99, 235, 0.6);
+}
+.sheet[data-mode='edit'] .ed:focus,
+.sheet[data-mode='edit'] .ed[aria-expanded='true'] {
+  outline: none;
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+}
+.sheet[data-mode='edit'] .ed.date {
+  cursor: pointer;
+}
+/* WebKit cannot put the caret inside an empty inline element that follows text ("Cena celkem: ", "DIČ: "):
+   it lands in the preceding label and typing goes nowhere. An inline-block box takes the caret. */
+.sheet[data-mode='edit'] .ed:empty {
+  display: inline-block;
+}
+.sheet[data-mode='edit'] .ed:empty::before {
+  content: attr(data-ph);
+  color: #a1a1aa;
+  font-weight: 400;
+}
+/* a value with a warning (bad IČO checksum): red wavy underline and a badge after it, outside the text flow */
+.sheet[data-mode='edit'] .ed[data-invalid] {
+  position: relative;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: #dc2626;
+}
+.sheet[data-mode='edit'] .ed[data-invalid]::after {
+  content: attr(data-invalid);
+  position: absolute;
+  left: calc(100% + 2mm);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 6px;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font: 500 11px/16px 'Segoe UI', system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* empty optional lines (DIČ, supplier note) exist only while editing */
+.sheet[data-mode='edit'] .p.controls {
+  color: #a1a1aa;
+}
+.sheet[data-mode='edit'] .fit[data-row='dueDate'] {
+  overflow: visible;
+}
+
+.sheet .sheet-warn {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid #f59e0b;
+  border-radius: 4px;
+  background: #fffbeb;
+  color: #92400e;
+  font: 500 11px/16px 'Segoe UI', system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
+}
+
+/*
+ * Sections bound to saved entries (EntitySection). The wrapper is layout-neutral (display: contents), so the
+ * paper's absolutely placed content keeps its geometry; outline, tag and buttons are overlays marked `controls`.
+ * The theme tokens are pinned to their light values here because the paper is white in both themes.
+ */
+.sheet {
+  --warn: #f59e0b;
+  --warn-weak: #fffbeb;
+  --warn-text: #92400e;
+  --new: #4f46e5;
+  --new-weak: #e0e7ff;
+  --new-text: #3730a3;
+  --accent: #2563eb;
+}
+.sheet .ent {
+  display: contents;
+}
+.sheet .ent-box {
+  position: absolute;
+  border: 1.5px solid transparent;
+  border-radius: 5px;
+}
+.sheet .ent[data-state='edited'] .ent-box {
+  border-color: var(--warn);
+}
+.sheet .ent[data-state='new'] .ent-box {
+  border-color: var(--new);
+}
+.sheet[data-mode='edit'] .ed[data-changed] {
+  background: var(--warn-weak);
+  box-shadow: 0 0 0 1.5px var(--warn-weak);
+  border-radius: 2px;
+  text-decoration-line: underline;
+  text-decoration-style: solid;
+  text-decoration-color: var(--warn);
+}
+.sheet .ent-tag {
+  position: absolute;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px 0 8px;
+  transform: translateY(-50%);
+  border: 1px solid #d4d4d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #27272a;
+  font: 500 11.5px/18px 'Segoe UI', system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.sheet .ent-tag svg {
+  color: #71717a;
+}
+.sheet .ent-tag-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sheet .ent-tag-state {
+  flex: none;
+  margin-left: -4px; /* cancel the flex gap: it continues the label */
+  white-space: pre;
+}
+.sheet .ent-tag-soft {
+  color: #71717a;
+  font-weight: 400;
+}
+.sheet .ent-tag:hover {
+  background: #f4f4f5;
+}
+.sheet .ent-tag:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* matches: the tag shows only while the section is hovered or focused (or its picker is open) */
+.sheet .ent[data-state='matches'] .ent-tag {
+  opacity: 0;
+}
+.sheet .ent[data-state='matches']:hover .ent-tag,
+.sheet .ent[data-state='matches']:focus-within .ent-tag,
+.sheet .ent[data-state='matches'][data-open] .ent-tag {
+  opacity: 1;
+}
+.sheet .ent[data-state='edited'] .ent-tag {
+  border-color: #fcd34d;
+  background: #fef3c7;
+  color: var(--warn-text);
+}
+.sheet .ent[data-state='new'] .ent-tag {
+  border-color: #c7d2fe;
+  background: var(--new-weak);
+  color: var(--new-text);
+}
+.sheet .ent[data-state='edited'] .ent-tag svg,
+.sheet .ent[data-state='edited'] .ent-tag-soft,
+.sheet .ent[data-state='new'] .ent-tag svg {
+  color: inherit;
+}
+.sheet .ent[data-state='edited'] .ent-tag:hover {
+  background: #fde68a;
+}
+.sheet .ent[data-state='new'] .ent-tag:hover {
+  background: #c7d2fe;
+}
+.sheet .ent-actions {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+}
+.sheet .ent-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid #d4d4d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #27272a;
+  font: 500 11.5px/20px 'Segoe UI', system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sheet .ent-btn:hover {
+  background: #f4f4f5;
+}
+.sheet .ent-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.sheet .ent-btn.primary:hover {
+  filter: brightness(1.1);
+}
+.sheet .ent-btn.ghost {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.9);
+  color: #52525b;
+}
+.sheet .ent-btn.ghost:hover {
+  background: #f4f4f5;
+}
+.sheet .ent-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.sheet .ent-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/*
+ * Printing uses the live edit-mode DOM, so every edit-only visual is undone here. A media query adds no
+ * specificity: these selectors must match the screen rules above ([data-mode='edit'] included) to win.
+ */
+@media print {
+  .sheet .controls {
+    display: none !important;
+  }
+  .sheet[data-mode='edit'] .ed,
+  .sheet[data-mode='edit'] .ed[data-changed] {
+    text-decoration: none !important;
+    background: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+  }
+  .sheet[data-mode='edit'] .ed[data-invalid]::after {
+    display: none;
+  }
+  /* empty field: no hint, but keep the line like the static sheet's zero-width space */
+  .sheet[data-mode='edit'] .ed:empty::before {
+    content: '\200b';
+    color: inherit;
+  }
+}

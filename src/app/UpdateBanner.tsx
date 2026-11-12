@@ -1,11 +1,11 @@
-import { useState } from 'preact/hooks'
+import { useRef, useState } from 'preact/hooks'
 import { waitForSave } from '../editor/actions'
 import { isSaved } from '../editor/editorState'
 import { Button } from '../ui/Button'
 import { confirmDialog } from '../ui/Dialog'
 import { toast } from '../ui/Toast'
 import { UpdateScreen } from './UpdateScreen'
-import { delay, installPendingUpdate, MIN_INSTALL_SCREEN_MS, updateBannerDismissed, updateReady } from './updates'
+import { delay, installPendingUpdate, MIN_INSTALL_SCREEN_MS, updateBannerDismissed, updateInstalling, updateReady } from './updates'
 
 /**
  * Offers to install an update the background download finished. Non-modal, bottom-right.
@@ -13,16 +13,24 @@ import { delay, installPendingUpdate, MIN_INSTALL_SCREEN_MS, updateBannerDismiss
  */
 export function UpdateBanner() {
   const [busy, setBusy] = useState(false)
-  const [installing, setInstalling] = useState(false)
+  // A ref, not only state: two clicks in the same task must not both get past the guard.
+  const started = useRef(false)
   const version = updateReady.value
   if (!version || updateBannerDismissed.value) return null
 
   const update = async () => {
-    if (busy) return
+    if (started.current) return
+    started.current = true
     setBusy(true)
+    const stop = () => {
+      updateInstalling.value = false
+      started.current = false
+      setBusy(false)
+    }
     try {
       await waitForSave()
-      if (!isSaved.value) {
+      const discard = !isSaved.value
+      if (discard) {
         const ok = await confirmDialog({
           title: 'Faktura není uložená',
           body: 'Aktualizace aplikaci restartuje a neuložené změny se ztratí.',
@@ -31,17 +39,23 @@ export function UpdateBanner() {
           danger: true,
         })
         if (!ok) {
-          setBusy(false)
+          stop()
           return
         }
       }
-      setInstalling(true)
+      // The overlay covers the app and App makes it inert, so nothing behind it can be edited or saved.
+      updateInstalling.value = true
       await delay(MIN_INSTALL_SCREEN_MS)
+      // Re-check: a save may still be running, or the invoice may have changed after the first check.
+      await waitForSave()
+      if (!discard && !isSaved.value) {
+        stop()
+        return
+      }
       // On Windows the process exits here and the app restarts in the new version.
       await installPendingUpdate()
     } catch {
-      setInstalling(false)
-      setBusy(false)
+      stop()
       updateBannerDismissed.value = true
       toast('Aktualizaci se nepodařilo spustit. Zkusím to při příštím spuštění.', 'warning')
     }
@@ -60,7 +74,7 @@ export function UpdateBanner() {
           </Button>
         </div>
       </div>
-      {installing && (
+      {updateInstalling.value && (
         <div class="upd-overlay">
           <UpdateScreen version={version} />
         </div>

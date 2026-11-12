@@ -15,7 +15,7 @@ import { TopBar } from './TopBar'
 import { applyTheme } from './theme'
 import { UpdateBanner } from './UpdateBanner'
 import { UpdateScreen } from './UpdateScreen'
-import { delay, downloadUpdateInBackground, installPendingUpdate, MIN_INSTALL_SCREEN_MS, pendingUpdate } from './updates'
+import { delay, downloadUpdateInBackground, installPendingUpdate, MIN_INSTALL_SCREEN_MS, pendingUpdate, updateInstalling } from './updates'
 import '../ui/theme.css'
 
 type Boot = { status: 'loading' } | { status: 'updating'; version: string } | { status: 'fresh' } | { status: 'ok' } | { status: 'error'; message: string; path: string | null }
@@ -98,7 +98,7 @@ export function App() {
     <>
       {boot.status === 'updating' && <UpdateScreen version={boot.version} />}
       {boot.status === 'ok' && (
-        <div class="app">
+        <div class="app" inert={updateInstalling.value}>
           <TopBar />
           <main class="main">{tab === 'faktura' ? <EditorPage /> : tab === 'historie' ? <HistoryPage /> : tab === 'udaje' ? <SavedPage /> : <SettingsPage />}</main>
         </div>

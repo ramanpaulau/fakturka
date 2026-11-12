@@ -29,6 +29,9 @@ export const updateReady = signal<string | null>(null)
 /** The update banner was dismissed (Později, or a failed install) for this session. */
 export const updateBannerDismissed = signal(false)
 
+/** The install screen started from the update banner covers the app; App makes the app inert meanwhile. */
+export const updateInstalling = signal(false)
+
 let downloadStarted = false
 
 /** Fire-and-forget download of the next update, at most once per app session. Errors are silent. */
@@ -49,4 +52,5 @@ export function resetUpdateSession(): void {
   downloadStarted = false
   updateReady.value = null
   updateBannerDismissed.value = false
+  updateInstalling.value = false
 }

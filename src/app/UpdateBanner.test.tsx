@@ -163,4 +163,60 @@ describe('UpdateBanner', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(installScreen()).not.toBeNull()
   })
+
+  it('waits again for a save that runs during the install screen before installing', async () => {
+    invoke.mockReturnValue(new Promise(() => {}))
+    updateReady.value = '0.3.0'
+    renderBanner()
+    fireEvent.click(screen.getByRole('button', { name: 'Aktualizovat' }))
+    await flush()
+    let finishSave!: () => void
+    waitForSave.mockReturnValue(new Promise<void>(r => { finishSave = r }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS * 2) })
+    expect(invoke).not.toHaveBeenCalled()
+    finishSave()
+    await flush()
+    expect(commands()).toEqual(['update_install_pending'])
+  })
+
+  it('does not install when the invoice became unsaved during the install screen; the banner stays', async () => {
+    invoke.mockReturnValue(new Promise(() => {}))
+    updateReady.value = '0.3.0'
+    renderBanner()
+    fireEvent.click(screen.getByRole('button', { name: 'Aktualizovat' }))
+    await flush()
+    expect(installScreen()).not.toBeNull()
+    isSaved.value = false
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS * 2) })
+    expect(invoke).not.toHaveBeenCalled()
+    expect(installScreen()).toBeNull()
+    expect(screen.getByRole('button', { name: 'Aktualizovat' })).not.toBeDisabled()
+  })
+
+  it('a confirmed discard still installs after the install screen', async () => {
+    invoke.mockReturnValue(new Promise(() => {}))
+    isSaved.value = false
+    updateReady.value = '0.3.0'
+    renderBanner()
+    fireEvent.click(screen.getByRole('button', { name: 'Aktualizovat' }))
+    await flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Zahodit a aktualizovat' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS) })
+    await flush()
+    expect(commands()).toEqual(['update_install_pending'])
+  })
+
+  it('two clicks in the same task start only one install', async () => {
+    invoke.mockReturnValue(new Promise(() => {}))
+    updateReady.value = '0.3.0'
+    renderBanner()
+    const button = screen.getByRole('button', { name: 'Aktualizovat' })
+    act(() => {
+      button.click()
+      button.click()
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(MIN_INSTALL_SCREEN_MS * 3) })
+    expect(waitForSave).toHaveBeenCalledTimes(2) // once before, once after the install screen
+    expect(commands()).toEqual(['update_install_pending'])
+  })
 })

@@ -328,7 +328,7 @@ input::placeholder {
   position: fixed;
   right: 16px;
   bottom: 72px;
-  z-index: 55;
+  z-index: 45; /* above popovers (40) and the toolbar (5), below dialogs (50) and toasts (60) */
   display: flex;
   flex-direction: column;
   gap: 10px;

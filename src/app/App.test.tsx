@@ -181,6 +181,16 @@ describe('App startup update flow', () => {
     expect(commands()).not.toContain('update_install_pending')
   })
 
+  it('Aktualizovat makes the app behind the install screen inert', async () => {
+    inTauri.mockReturnValue(true)
+    backend().dataFile = JSON.stringify(emptySavedData())
+    mockCommands({ pending: null, download: '0.3.0', install: 'never' })
+    const { container } = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Aktualizovat' }))
+    expect(await screen.findByRole('heading', { name: 'Instaluji novou verzi 0.3.0…' })).toBeInTheDocument()
+    expect(container.querySelector('.app')).toHaveAttribute('inert')
+  })
+
   it('no update banner on the onboarding screen', async () => {
     inTauri.mockReturnValue(true)
     mockCommands({ pending: null, download: '0.3.0' })

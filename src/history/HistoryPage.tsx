@@ -130,8 +130,10 @@ function Row({ rec, act }: { rec: InvoiceRecord; act: RowActions }) {
   )
 }
 
-function YearSection({ year, records, count, total, collapsed, onToggle, act, showHead }: {
+function YearSection({ year, records, count, total, collapsed, onToggle, act, showHead, showSum }: {
   year: string; records: InvoiceRecord[]; count: number; total: number; collapsed: boolean; onToggle: () => void; act: RowActions; showHead: boolean
+  /** false when this is the only year: the summary line above already says the same */
+  showSum: boolean
 }) {
   const Chevron = collapsed ? ChevronRight : ChevronDown
   return (
@@ -140,13 +142,15 @@ function YearSection({ year, records, count, total, collapsed, onToggle, act, sh
         <span class="hist-year-title">
           <Chevron size={16} />
           {year}
-        </span>{' '}
+        </span>
         {year === OTHER_GROUP ? (
-          <span class="hist-sum">{plural(count, 'soubor', 'soubory', 'souborů')}</span>
+          <> <span class="hist-sum">{plural(count, 'soubor', 'soubory', 'souborů')}</span></>
         ) : (
-          <span class="hist-sum">
-            {invoices(count)} · celkem <b>{formatCzk(total)}</b>
-          </span>
+          showSum && (
+            <> <span class="hist-sum">
+              {invoices(count)} · celkem <b>{formatCzk(total)}</b>
+            </span></>
+          )
         )}
       </button>
       {!collapsed && (
@@ -295,6 +299,7 @@ export function HistoryPage() {
   const groups = groupByYear(shown)
   // The column header goes once above the first group that is open, so collapsing the newest year keeps it.
   const headGroup = groups.findIndex(g => !collapsed.has(g.year))
+  const multiYear = groups.filter(g => g.year !== OTHER_GROUP).length > 1
   const monthsWithInvoices = new Set((records ?? []).flatMap(r => (r.kind === 'invoice' ? [r.invoice.issueDate.slice(0, 7)] : [])))
   const countInvoices = (r: MonthRange) => filterByRange(records ?? [], r).filter(x => x.kind === 'invoice').length
 
@@ -330,7 +335,7 @@ export function HistoryPage() {
           <div class="hist-empty">{records.length === 0 ? 'Zatím tu nejsou žádné faktury.' : 'Nic nenalezeno.'}</div>
         )}
         {groups.map((g, i) => (
-          <YearSection key={g.year} {...g} showHead={i === headGroup} collapsed={collapsed.has(g.year)} onToggle={() => toggle(g.year)} act={act} />
+          <YearSection key={g.year} {...g} showHead={i === headGroup} showSum={multiYear} collapsed={collapsed.has(g.year)} onToggle={() => toggle(g.year)} act={act} />
         ))}
       </div>
       {printSheet && (

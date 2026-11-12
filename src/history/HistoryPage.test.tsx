@@ -189,6 +189,9 @@ describe('list', () => {
       expect(screen.queryByText('202611')).toBeNull()
       expect(screen.getByText('202510')).toBeInTheDocument()
       expect(container.querySelector('.hist-meta .hist-sum')?.textContent).toBe(`1 faktura · celkem ${formatCzk(10000)}`)
+      // one year only: its heading does not repeat the summary line
+      expect(container.querySelector('.hist-year-head')?.textContent).toBe('2025')
+      expect(container.querySelector('.hist-year .hist-sum')).toBeNull()
     })
 
     it('shows the applied range in the field and the footer counts its invoices, not lone PDFs', async () => {

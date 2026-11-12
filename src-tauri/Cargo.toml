@@ -1,6 +1,6 @@
 [package]
 name = "fakturka"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fakturka - invoice desktop app"
 edition = "2024"
 
